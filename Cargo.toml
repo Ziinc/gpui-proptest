@@ -1,0 +1,35 @@
+[package]
+name = "gpui-proptest"
+version = "0.1.0"
+edition = "2024"
+description = "Property-based testing for GPUI: random user actions, invariants and shrinking to a minimal replayable trace"
+repository = "https://github.com/Ziinc/gpui-proptest"
+keywords = ["gpui", "proptest", "property-testing", "testing", "ui"]
+categories = ["development-tools::testing", "gui"]
+
+[features]
+default = ["proptest"]
+# The proptest engine: generation, shrinking and `proptest-regressions/` persistence.
+proptest = ["dep:proptest"]
+# Target discovery from gpui-kit's `.test_support()` observation, plus the
+# snapshot-based oracles (focus validity, disabled elements are inert).
+kit = ["dep:gpui-kit", "dep:gpui-base"]
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
+arbitrary = { version = "1", features = ["derive"] }
+proptest = { version = "1", optional = true }
+gpui-kit = { version = "=0.7.3", features = ["test-support"], optional = true }
+gpui-base = { version = "=0.7.3", features = ["test-support"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+gpui-kit = { version = "=0.7.3", features = ["test-support", "component"] }
+
+[[test]]
+name = "kit"
+required-features = ["kit"]
+
+# GPUI is slow unoptimized; this only affects this crate's own tests.
+[profile.dev.package."*"]
+opt-level = 2
