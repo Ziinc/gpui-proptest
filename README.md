@@ -171,3 +171,7 @@ opt-level = 2
 ## Linux
 
 Building with the `kit` feature links GPUI's Linux platform, which needs `libxkbcommon-dev` and `libxkbcommon-x11-dev`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
