@@ -10,7 +10,7 @@ use std::{
 };
 
 /// An element the runner can act on, as painted in the last frame.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct TargetInfo {
     path: Vec<ElementId>,
     bounds: Bounds<Pixels>,
@@ -21,6 +21,35 @@ pub struct TargetInfo {
     label: Option<String>,
     state: String,
     click_point: Option<Point<Pixels>>,
+    /// The probe hitbox of a `proptest_target`, hit-tested only when the target is
+    /// chosen: testing every target each step is quadratic in the hitbox count.
+    probe: Option<Rc<Hitbox>>,
+}
+
+impl PartialEq for TargetInfo {
+    fn eq(&self, other: &Self) -> bool {
+        (
+            &self.path,
+            self.bounds,
+            self.visible,
+            self.disabled,
+            self.focused,
+            self.role,
+            &self.label,
+            &self.state,
+            self.click_point,
+        ) == (
+            &other.path,
+            other.bounds,
+            other.visible,
+            other.disabled,
+            other.focused,
+            other.role,
+            &other.label,
+            &other.state,
+            other.click_point,
+        )
+    }
 }
 
 impl TargetInfo {
@@ -36,6 +65,7 @@ impl TargetInfo {
             label: None,
             state: String::new(),
             click_point: Some(bounds.center()),
+            probe: None,
         }
     }
 
@@ -77,14 +107,14 @@ impl TargetInfo {
     }
 
     /// Sets where pointer steps aim, or `None` when another element covers the
-    /// whole target. Defaults to the centre of the bounds.
+    /// whole target. Defaults to the centre of the bounds. A `proptest_target` is
+    /// also hit-tested when chosen, and aimed at a point no overlay covers.
     pub fn with_click_point(mut self, click_point: Option<Point<Pixels>>) -> Self {
         self.click_point = click_point;
         self
     }
 
-    /// Where pointer steps aim: a point on the target that no other element
-    /// covers, or `None` when the target is covered everywhere.
+    /// Where pointer steps aim, or `None` when the target is covered everywhere.
     pub fn click_point(&self) -> Option<Point<Pixels>> {
         self.click_point
     }
@@ -172,19 +202,23 @@ impl TargetSource for ObservedTargets {
                         .values()
                         .filter_map(Weak::upgrade)
                         .map(|entry| {
-                            let facts = entry.facts.borrow().clone();
-                            match &*entry.hitbox.borrow() {
-                                Some(hitbox) => {
-                                    let click_point = uncovered_point(hitbox, window);
-                                    facts.with_click_point(click_point)
-                                }
-                                None => facts,
-                            }
+                            let mut facts = entry.facts.borrow().clone();
+                            facts.probe = entry.hitbox.borrow().clone();
+                            facts
                         })
                         .collect()
                 })
                 .unwrap_or_default()
         })
+    }
+}
+
+/// Where to aim at `target` in the current frame: its click point, refined by
+/// a hit test when it has a probe. `None` when it is covered everywhere.
+pub(crate) fn aim(target: &TargetInfo, window: &Window) -> Option<Point<Pixels>> {
+    match &target.probe {
+        Some(hitbox) => uncovered_point(hitbox, window),
+        None => target.click_point,
     }
 }
 
@@ -214,19 +248,26 @@ fn uncovered_point(hitbox: &Hitbox, window: &Window) -> Option<Point<Pixels>> {
 
 /// Orders targets top to bottom, then left to right, then by path, so a target
 /// choice resolves to the same element on every run.
+/// Paths are formatted only to break ties, which are rare.
 pub(crate) fn sort(targets: &mut [TargetInfo]) {
     targets.sort_by(|a, b| {
         (a.bounds.origin.y, a.bounds.origin.x)
             .partial_cmp(&(b.bounds.origin.y, b.bounds.origin.x))
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| format!("{:?}", a.path).cmp(&format!("{:?}", b.path)))
+            .then_with(|| {
+                if a.path == b.path {
+                    std::cmp::Ordering::Equal
+                } else {
+                    format!("{:?}", a.path).cmp(&format!("{:?}", b.path))
+                }
+            })
     });
 }
 
 type Registry = HashMap<WindowId, HashMap<GlobalElementId, Weak<Registration>>>;
 thread_local! { static REGISTRY: RefCell<Registry> = RefCell::new(HashMap::new()); }
 
-thread_local! { static PREPAINTS: RefCell<HashMap<GlobalElementId, u32>> = RefCell::new(HashMap::new()); }
+thread_local! { static STEP: Cell<u64> = const { Cell::new(0) }; }
 
 /// Prefixes the panic a render loop raises, so the harness reports it as `livelock`.
 pub(crate) const LIVELOCK: &str = "livelock";
@@ -237,7 +278,7 @@ pub(crate) const FRAME_LIMIT: u32 = 1_000;
 
 /// Starts counting frames for a new step.
 pub(crate) fn begin_step() {
-    PREPAINTS.with(|counts| counts.borrow_mut().clear());
+    STEP.with(|step| step.set(step.get() + 1));
 }
 
 thread_local! { static DUPLICATES: RefCell<Vec<Vec<ElementId>>> = const { RefCell::new(Vec::new()) }; }
@@ -261,10 +302,12 @@ pub struct Registration {
     window: WindowId,
     global_id: GlobalElementId,
     facts: RefCell<TargetInfo>,
-    hitbox: RefCell<Option<Hitbox>>,
+    hitbox: RefCell<Option<Rc<Hitbox>>>,
     /// Prepaints since the last paint. Elements with the same id share element
     /// state, so a second prepaint before the first paint means a duplicate id.
     unpainted: Cell<u32>,
+    /// The step this target was last laid out in, and how often within it.
+    frames: Cell<(u64, u32)>,
 }
 
 impl Drop for Registration {
@@ -355,19 +398,6 @@ impl<E: Element> Element for Target<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let global_id = id.expect("targets have an id");
-        let frames = PREPAINTS.with(|counts| {
-            let mut counts = counts.borrow_mut();
-            let count = counts.entry(global_id.clone()).or_default();
-            *count += 1;
-            *count
-        });
-        if frames > FRAME_LIMIT {
-            begin_step();
-            panic!(
-                "{LIVELOCK}: {global_id:?} was laid out {FRAME_LIMIT} times in one step; \
-                 rendering never settles, such as a hover or layout change that undoes itself"
-            );
-        }
         let role = self.inner.a11y_role();
         let mut node = gpui::accesskit::Node::new(role.unwrap_or(gpui::Role::Unknown));
         self.inner.write_a11y_info(&mut node);
@@ -393,6 +423,7 @@ impl<E: Element> Element for Target<E> {
                         facts: RefCell::new(facts.clone()),
                         hitbox: RefCell::new(None),
                         unpainted: Cell::new(0),
+                        frames: Cell::new((0, 0)),
                     })
                 });
                 *registration.facts.borrow_mut() = facts;
@@ -405,6 +436,21 @@ impl<E: Element> Element for Target<E> {
                 });
                 (registration.clone(), registration)
             });
+        let step = STEP.with(Cell::get);
+        let frames = match registration.frames.get() {
+            (seen, frames) if seen == step => frames + 1,
+            _ => 1,
+        };
+        registration.frames.set((step, frames));
+        if frames > FRAME_LIMIT {
+            // Later layouts while the panic unwinds count afresh, so they cannot
+            // panic again.
+            begin_step();
+            panic!(
+                "{LIVELOCK}: {global_id:?} was laid out {FRAME_LIMIT} times in one step; \
+                 rendering never settles, such as a hover or layout change that undoes itself"
+            );
+        }
         let unpainted = registration.unpainted.get() + 1;
         registration.unpainted.set(unpainted);
         if unpainted == 2 {
@@ -415,8 +461,9 @@ impl<E: Element> Element for Target<E> {
             .prepaint(id, inspector, bounds, layout, window, cx);
         // Inserted after the element's own content, so only elements painted later
         // (siblings, overlays, deferred popovers) can cover it.
-        *registration.hitbox.borrow_mut() =
-            Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
+        *registration.hitbox.borrow_mut() = Some(Rc::new(
+            window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        ));
         (inner, registration)
     }
 

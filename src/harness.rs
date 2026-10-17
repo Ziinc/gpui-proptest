@@ -291,13 +291,9 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                 return self.window_closed(index.checked_sub(1), &steps[index..], trace);
             };
             let verb = step.verb();
-            let target = step.target_choice().and_then(|choice| {
-                let eligible: Vec<_> = targets
-                    .iter()
-                    .filter(|target| is_eligible(verb, target))
-                    .collect();
-                (!eligible.is_empty()).then(|| eligible[choice as usize % eligible.len()].clone())
-            });
+            let target = step
+                .target_choice()
+                .and_then(|choice| self.choose(cx, window, &targets, verb, choice));
             let key = match step {
                 Step::Press { key } if !self.keys.is_empty() => {
                     Some(self.keys[*key as usize % self.keys.len()].clone())
@@ -341,6 +337,36 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             self.check_oracles(cx, window, &view, Some(index), before)?;
         }
         Ok(())
+    }
+
+    /// The eligible target `choice` picks, aimed at a point nothing covers. A
+    /// covered target passes the pick to the next eligible one, so only the
+    /// targets walked past are hit-tested.
+    fn choose(
+        &self,
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        targets: &[TargetInfo],
+        verb: Verb,
+        choice: u16,
+    ) -> Option<TargetInfo> {
+        let eligible: Vec<_> = targets
+            .iter()
+            .filter(|target| is_eligible(verb, target))
+            .collect();
+        if eligible.is_empty() {
+            return None;
+        }
+        let start = choice as usize % eligible.len();
+        cx.update_window(window, |_, window, _| {
+            (0..eligible.len()).find_map(|offset| {
+                let target = eligible[(start + offset) % eligible.len()];
+                target::aim(target, window)
+                    .map(|point| target.clone().with_click_point(Some(point)))
+            })
+        })
+        .ok()
+        .flatten()
     }
 
     /// Ends the case once the window has closed after `step`: a failure unless the
@@ -562,14 +588,14 @@ impl<V: 'static, A: 'static> Harness<V, A> {
     /// `None` once the window has closed.
     fn targets(&self, cx: &mut TestAppContext, window: AnyWindowHandle) -> Option<Vec<TargetInfo>> {
         cx.update_window(window, |_, window, cx| {
-            let mut seen = std::collections::HashSet::new();
             let mut targets: Vec<_> = self
                 .sources
                 .iter()
                 .flat_map(|source| source.targets(window, cx))
-                .filter(|target| seen.insert(target.path().to_vec()))
                 .collect();
+            // A stable sort keeps the first source's copy first among equal paths.
             target::sort(&mut targets);
+            targets.dedup_by(|later, earlier| later.path() == earlier.path());
             targets
         })
         .ok()

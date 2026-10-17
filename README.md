@@ -162,10 +162,11 @@ A case costs about 1 ms to set up and about 1 ms per click in an optimized build
 opt-level = 2
 ```
 
+Cost grows linearly with the number of targets. With 2,000 targets a click costs about 20 ms in an optimized build, most of it GPUI layout. Only the chosen target is hit-tested for overlays. `cargo test --test many_targets -- --ignored --nocapture` prints the timings.
+
 ## Limitations
 
 - `kit` targets are aimed at their centre without a cover check: gpui-base does not expose their hitboxes. A `proptest_target` is hit-tested, aimed at a point no `occlude()` overlay covers, and skipped when covered everywhere.
-- Targets are collected and sorted after every step. With 2,000 targets a click costs about 60 ms.
 - The render-loop guard counts `proptest_target` elements only, not `kit` targets. A render loop in a view without them still hangs.
 
 ## Linux
