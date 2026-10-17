@@ -269,6 +269,10 @@ thread_local! { static REGISTRY: RefCell<Registry> = RefCell::new(HashMap::new()
 
 thread_local! { pub(crate) static STEP: Cell<u64> = const { Cell::new(0) }; }
 
+// Counts target prepaints, so a paint can tell whether another element with
+// the same id was prepainted after its own prepaint.
+thread_local! { static PREPAINTS: Cell<u64> = const { Cell::new(0) }; }
+
 /// Prefixes the panic a render loop raises, so the harness reports it as `livelock`.
 pub(crate) const LIVELOCK: &str = "livelock";
 
@@ -303,9 +307,12 @@ pub struct Registration {
     global_id: GlobalElementId,
     facts: RefCell<TargetInfo>,
     hitbox: RefCell<Option<Rc<Hitbox>>>,
-    /// Prepaints since the last paint. Elements with the same id share element
-    /// state, so a second prepaint before the first paint means a duplicate id.
-    unpainted: Cell<u32>,
+    /// The last prepaint of an element with this id. Elements with the same id
+    /// share element state, so painting an element that was not the last one
+    /// prepainted means two elements with that id made it into one frame.
+    /// Prepaints that are never painted, such as inside an invisible parent or a
+    /// `list` that prepaints again after autoscrolling, are not duplicates.
+    last_prepaint: Cell<u64>,
     /// The step this target was last laid out in, and how often within it.
     frames: Cell<(u64, u32)>,
 }
@@ -368,7 +375,7 @@ impl<E: Element> IntoElement for Target<E> {
 
 impl<E: Element> Element for Target<E> {
     type RequestLayoutState = E::RequestLayoutState;
-    type PrepaintState = (E::PrepaintState, Rc<Registration>);
+    type PrepaintState = (E::PrepaintState, Rc<Registration>, u64);
 
     fn id(&self) -> Option<ElementId> {
         Element::id(&self.inner)
@@ -422,7 +429,7 @@ impl<E: Element> Element for Target<E> {
                         global_id: global_id.clone(),
                         facts: RefCell::new(facts.clone()),
                         hitbox: RefCell::new(None),
-                        unpainted: Cell::new(0),
+                        last_prepaint: Cell::new(0),
                         frames: Cell::new((0, 0)),
                     })
                 });
@@ -451,11 +458,11 @@ impl<E: Element> Element for Target<E> {
                  rendering never settles, such as a hover or layout change that undoes itself"
             );
         }
-        let unpainted = registration.unpainted.get() + 1;
-        registration.unpainted.set(unpainted);
-        if unpainted == 2 {
-            DUPLICATES.with(|duplicates| duplicates.borrow_mut().push(global_id.to_vec()));
-        }
+        let prepaint = PREPAINTS.with(|prepaints| {
+            prepaints.set(prepaints.get() + 1);
+            prepaints.get()
+        });
+        registration.last_prepaint.set(prepaint);
         let inner = self
             .inner
             .prepaint(id, inspector, bounds, layout, window, cx);
@@ -464,7 +471,7 @@ impl<E: Element> Element for Target<E> {
         *registration.hitbox.borrow_mut() = Some(Rc::new(
             window.insert_hitbox(bounds, HitboxBehavior::Normal),
         ));
-        (inner, registration)
+        (inner, registration, prepaint)
     }
 
     fn paint(
@@ -480,7 +487,16 @@ impl<E: Element> Element for Target<E> {
         let clipped = bounds
             .intersect(&window.content_mask().bounds)
             .intersect(&Bounds::new(Default::default(), window.viewport_size()));
-        prepaint.1.unpainted.set(0);
+        // Every prepaint of a frame comes before its first paint.
+        if prepaint.1.last_prepaint.get() != prepaint.2 {
+            let path = prepaint.1.global_id.to_vec();
+            DUPLICATES.with(|duplicates| {
+                let mut duplicates = duplicates.borrow_mut();
+                if !duplicates.contains(&path) {
+                    duplicates.push(path);
+                }
+            });
+        }
         prepaint.1.facts.borrow_mut().visible =
             clipped.size.width > px(0.) && clipped.size.height > px(0.);
         self.inner
