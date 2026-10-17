@@ -383,3 +383,26 @@ fn u_awkward_text() {
         assert!(outcome.is_ok(), "{text:?}: {outcome:?}");
     }
 }
+
+// N. Two targets with the same id under one parent share GPUI element state.
+struct Twins;
+impl Render for Twins {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(div().id("twin").size(px(40.)).proptest_target())
+            .child(div().id("twin").size(px(40.)).proptest_target())
+    }
+}
+
+#[test]
+fn n_duplicate_ids() {
+    let outcome = Harness::new(|_, cx| cx.new(|_| Twins)).run_case(0, &[]);
+    let failure = outcome.failure().expect("the shared id is reported");
+    assert_eq!(failure.oracle(), "unique-ids");
+    assert!(failure.message().contains("twin"), "{failure}");
+    let outcome = Harness::new(|_, cx| cx.new(|_| Twins))
+        .with_unique_ids(false)
+        .run_case(0, &[click(0)]);
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
