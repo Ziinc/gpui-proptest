@@ -225,6 +225,37 @@ fn c_task_that_never_parks() {
     assert_eq!(oracle.as_deref(), Some("livelock"));
 }
 
+// C2. The same task, started by a timer that fires inside AdvanceClock.
+struct DelayedSpinner;
+impl Render for DelayedSpinner {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full()
+    }
+}
+
+#[test]
+fn c_task_that_never_parks_after_a_timer() {
+    let oracle = within(60, || {
+        let outcome = Harness::new(|_, cx| {
+            cx.new(|cx: &mut Context<DelayedSpinner>| {
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    loop {
+                        YieldNow(false).await;
+                    }
+                })
+                .detach();
+                DelayedSpinner
+            })
+        })
+        .run_case(0, &[Step::AdvanceClock { millis: 200 }]);
+        outcome.failure().map(|failure| failure.oracle().to_owned())
+    });
+    assert_eq!(oracle.as_deref(), Some("livelock"));
+}
+
 // D. A periodic timer, like a caret blink, must not hang or fail teardown.
 struct Ticker {
     ticks: u32,

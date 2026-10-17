@@ -92,7 +92,7 @@ Steps never store a concrete element. A step says "click the Nth eligible target
 | Oracle | Fails when |
 | --- | --- |
 | `panic` | anything panics: a listener, render, a task or an invariant |
-| `livelock` | a step never settles: a task reschedules itself for 100,000 ticks, or the window draws 1,000 frames for one input event or timer without GPUI's clock moving (a hover or layout change that undoes itself). An animation that draws a frame per timer is not a loop |
+| `livelock` | a step never settles: a task reschedules itself for 100,000 ticks (including one a timer wakes during `AdvanceClock`), or the window draws 1,000 frames for one input event or timer without GPUI's clock moving (a hover or layout change that undoes itself). An animation that draws a frame per timer is not a loop |
 | `teardown` | closing the app panics, or GPUI's test scheduler reports non-determinism at the end of a case |
 | `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state |
 | `unique-ids` | two `proptest_target`s with the same id path are painted in one frame, so GPUI gives them one element state. A target prepainted but not painted, such as inside an `invisible()` parent, does not count |

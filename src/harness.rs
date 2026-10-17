@@ -577,9 +577,9 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                     }
                 }
             }
-            Step::AdvanceClock { millis } => cx
-                .executor()
-                .advance_clock(Duration::from_millis(*millis as u64)),
+            Step::AdvanceClock { millis } => {
+                advance_clock(cx, Duration::from_millis(*millis as u64))?
+            }
             Step::Domain(action) => {
                 let perform = self.domain.as_ref().unwrap();
                 return Ok(cx
@@ -760,6 +760,29 @@ fn settle(cx: &mut TestAppContext) -> Result<(), Failure> {
         "livelock",
         format!(
             "tasks were still runnable after {TICK_LIMIT} scheduler ticks; a task reschedules itself forever"
+        ),
+    ))
+}
+
+/// Advances GPUI's clock by `duration` one timer at a time, settling after each.
+/// `TestScheduler::advance_clock` runs tasks without a bound, so a task a timer
+/// wakes that never parks would hang it instead of failing `settle`.
+fn advance_clock(cx: &mut TestAppContext, duration: Duration) -> Result<(), Failure> {
+    let executor = cx.executor().scheduler_executor();
+    let scheduler = cx.dispatcher.scheduler().clone();
+    let deadline = executor.now() + duration;
+    // A timer at the deadline, so stepping to the next timer never passes it.
+    let _deadline = executor.timer(duration);
+    for _ in 0..TICK_LIMIT {
+        settle(cx)?;
+        if executor.now() >= deadline || !scheduler.advance_clock_to_next_timer() {
+            return Ok(());
+        }
+    }
+    Err(Failure::from_oracle(
+        "livelock",
+        format!(
+            "timers fired {TICK_LIMIT} times within one AdvanceClock step; a timer reschedules itself with almost no delay"
         ),
     ))
 }
