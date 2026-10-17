@@ -93,6 +93,7 @@ Steps never store a concrete element. A step says "click the Nth eligible target
 | `teardown` | closing the app panics, or GPUI's test scheduler reports non-determinism at the end of a case |
 | `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state |
 | `unique-ids` | two `proptest_target`s share an id path, so GPUI gives them one element state |
+| `window-closed` | a step closes the window; allow it with `with_window_may_close(true)`, which ends the case and records the rest as not run |
 | `focus-is-visible` | a target that reports focus is not visible (with `kit`, which reports focus) |
 
 Turn them off with `with_disabled_is_inert(false)`, `with_focus_is_visible(false)` and `with_unique_ids(false)`.
@@ -164,7 +165,6 @@ opt-level = 2
 ## Limitations
 
 - `kit` targets are aimed at their centre without a cover check: gpui-base does not expose their hitboxes. A `proptest_target` is hit-tested, aimed at a point no `occlude()` overlay covers, and skipped when covered everywhere.
-- A step that closes the window ends the case. Later steps are not run and no oracle fails.
 - Targets are collected and sorted after every step. With 2,000 targets a click costs about 60 ms.
 - The render-loop guard counts `proptest_target` elements only, not `kit` targets. A render loop in a view without them still hangs.
 

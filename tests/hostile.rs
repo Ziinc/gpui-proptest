@@ -52,9 +52,24 @@ impl Render for Closer {
 #[test]
 fn a_closing_window() {
     let outcome = Harness::new(|_, cx| cx.new(|_| Closer)).run_case(0, &[click(0), click(0)]);
-    // The case ends quietly: steps after the window closes are not run.
+    let failure = outcome
+        .failure()
+        .expect("closing the window fails the case");
+    assert_eq!(failure.oracle(), "window-closed");
+    assert_eq!(failure.step(), Some(0));
+
+    // When closing is allowed, the rest of the steps are recorded as not run.
+    let outcome = Harness::new(|_, cx| cx.new(|_| Closer))
+        .with_window_may_close(true)
+        .run_case(0, &[click(0), click(0)]);
     assert!(outcome.is_ok(), "{outcome:?}");
-    assert_eq!(outcome.trace().records().len(), 1);
+    let records = outcome.trace().records();
+    assert_eq!(records.len(), 2);
+    assert!(records[1].is_skipped());
+    assert!(
+        records[1].description().contains("window closed"),
+        "{outcome:?}"
+    );
 }
 
 // B. A target under an `occlude()` overlay. Clicks aim at an uncovered point, and
