@@ -64,7 +64,9 @@ fn harness(buggy: bool) -> Harness<Counter> {
 
 #[test]
 fn a_correct_counter_survives_fuzzing() {
-    gpui_proptest::fuzz!(harness(false), |check| check.with_iterations(200));
+    gpui_proptest::fuzz!(harness(false), |check| check
+        .with_iterations(200)
+        .with_max_len(256));
 }
 
 #[test]
