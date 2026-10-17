@@ -89,7 +89,8 @@ Steps never store a concrete element. A step says "click the Nth eligible target
 | Oracle | Fails when |
 | --- | --- |
 | `panic` | anything panics: a listener, render, a task or an invariant |
-| `scheduler` | GPUI's test scheduler reports non-determinism at the end of a case |
+| `livelock` | a step never settles: a task reschedules itself for 100,000 ticks, or a `proptest_target` lays out 1,000 times (a hover or layout change that undoes itself) |
+| `teardown` | closing the app panics, or GPUI's test scheduler reports non-determinism at the end of a case |
 | `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state |
 | `focus-is-visible` | a target that reports focus is not visible (with `kit`, which reports focus) |
 
@@ -158,6 +159,14 @@ A case costs about 1 ms to set up and about 1 ms per click in an optimized build
 [profile.dev.package."*"]
 opt-level = 2
 ```
+
+## Limitations
+
+- A target covered by another element (a modal scrim, an `occlude()` overlay) is still eligible. The click lands on the cover while the trace names the target.
+- Two targets with the same id under one parent share a path, so only one of them is ever chosen.
+- A step that closes the window ends the case. Later steps are not run and no oracle fails.
+- Targets are collected and sorted after every step. With 2,000 targets a click costs about 60 ms.
+- The render-loop guard counts `proptest_target` elements only, not `kit` targets. A render loop in a view without them still hangs.
 
 ## Linux
 

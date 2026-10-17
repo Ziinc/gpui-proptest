@@ -178,9 +178,24 @@ pub(crate) fn sort(targets: &mut [TargetInfo]) {
 type Registry = HashMap<WindowId, HashMap<GlobalElementId, Weak<Registration>>>;
 thread_local! { static REGISTRY: RefCell<Registry> = RefCell::new(HashMap::new()); }
 
+thread_local! { static PREPAINTS: RefCell<HashMap<GlobalElementId, u32>> = RefCell::new(HashMap::new()); }
+
+/// Prefixes the panic a render loop raises, so the harness reports it as `livelock`.
+pub(crate) const LIVELOCK: &str = "livelock";
+
+/// How often one target may lay out within a single step before the step counts
+/// as a render loop. A step draws a handful of frames; a feedback loop draws forever.
+pub(crate) const FRAME_LIMIT: u32 = 1_000;
+
+/// Starts counting frames for a new step.
+pub(crate) fn begin_step() {
+    PREPAINTS.with(|counts| counts.borrow_mut().clear());
+}
+
 /// Forgets every registration. Each case builds a new app whose window ids may repeat.
 pub(crate) fn clear_registry() {
     REGISTRY.with(|registry| registry.borrow_mut().clear());
+    begin_step();
 }
 
 /// A target's registration, owned by GPUI element state so it lives exactly as long
@@ -280,6 +295,19 @@ impl<E: Element> Element for Target<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let global_id = id.expect("targets have an id");
+        let frames = PREPAINTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            let count = counts.entry(global_id.clone()).or_default();
+            *count += 1;
+            *count
+        });
+        if frames > FRAME_LIMIT {
+            begin_step();
+            panic!(
+                "{LIVELOCK}: {global_id:?} was laid out {FRAME_LIMIT} times in one step; \
+                 rendering never settles, such as a hover or layout change that undoes itself"
+            );
+        }
         let role = self.inner.a11y_role();
         let mut node = gpui::accesskit::Node::new(role.unwrap_or(gpui::Role::Unknown));
         self.inner.write_a11y_info(&mut node);
