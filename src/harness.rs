@@ -56,6 +56,7 @@ pub struct Harness<V: 'static, A: 'static = NoDomain> {
     disabled_is_inert: bool,
     focus_is_visible: bool,
     unique_ids: bool,
+    window_may_close: bool,
     ui_steps: bool,
 }
 
@@ -97,6 +98,7 @@ impl<V: 'static> Harness<V> {
             disabled_is_inert: true,
             focus_is_visible: true,
             unique_ids: true,
+            window_may_close: false,
             ui_steps: true,
         }
     }
@@ -154,6 +156,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             disabled_is_inert: self.disabled_is_inert,
             focus_is_visible: self.focus_is_visible,
             unique_ids: self.unique_ids,
+            window_may_close: self.window_may_close,
             ui_steps: self.ui_steps,
         }
     }
@@ -183,6 +186,14 @@ impl<V: 'static, A: 'static> Harness<V, A> {
     /// them can be chosen.
     pub fn with_unique_ids(mut self, enabled: bool) -> Self {
         self.unique_ids = enabled;
+        self
+    }
+
+    /// Whether a step may close the window. Off by default: closing it fails the
+    /// case with the `window-closed` oracle. When on, the case ends there and the
+    /// remaining steps are recorded as not run.
+    pub fn with_window_may_close(mut self, enabled: bool) -> Self {
+        self.window_may_close = enabled;
         self
     }
 
@@ -271,13 +282,13 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         let (window, view) = cx.update(|cx| (self.open)(cx));
         settle(cx).map_err(|failure| failure.at_step(None))?;
         if !render(cx, window) {
-            return Ok(());
+            return self.window_closed(None, steps, trace);
         }
         self.check_oracles(cx, window, &view, None, None)?;
 
         for (index, step) in steps.iter().enumerate() {
             let Some(targets) = self.targets(cx, window) else {
-                return Ok(());
+                return self.window_closed(index.checked_sub(1), &steps[index..], trace);
             };
             let verb = step.verb();
             let target = step.target_choice().and_then(|choice| {
@@ -325,9 +336,38 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             }
             settle(cx).map_err(|failure| failure.at_step(Some(index)))?;
             if !render(cx, window) {
-                return Ok(());
+                return self.window_closed(Some(index), &steps[index + 1..], trace);
             }
             self.check_oracles(cx, window, &view, Some(index), before)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the case once the window has closed after `step`: a failure unless the
+    /// harness allows it, else `rest` is recorded as not run.
+    fn window_closed(
+        &self,
+        step: Option<usize>,
+        rest: &[Step<A>],
+        trace: &RefCell<Trace>,
+    ) -> Result<(), Failure>
+    where
+        A: Debug,
+    {
+        if !self.window_may_close {
+            return Err(Failure::from_oracle(
+                "window-closed",
+                "the window closed; allow it with Harness::with_window_may_close(true)",
+            )
+            .at_step(step));
+        }
+        let mut trace = trace.borrow_mut();
+        for step in rest {
+            trace.push(StepRecord::new(
+                step.to_rust(),
+                format!("{} (window closed, not run)", step.to_rust()),
+                true,
+            ));
         }
         Ok(())
     }
