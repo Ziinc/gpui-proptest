@@ -267,7 +267,7 @@ pub(crate) fn sort(targets: &mut [TargetInfo]) {
 type Registry = HashMap<WindowId, HashMap<GlobalElementId, Weak<Registration>>>;
 thread_local! { static REGISTRY: RefCell<Registry> = RefCell::new(HashMap::new()); }
 
-thread_local! { static STEP: Cell<u64> = const { Cell::new(0) }; }
+thread_local! { pub(crate) static STEP: Cell<u64> = const { Cell::new(0) }; }
 
 /// Prefixes the panic a render loop raises, so the harness reports it as `livelock`.
 pub(crate) const LIVELOCK: &str = "livelock";

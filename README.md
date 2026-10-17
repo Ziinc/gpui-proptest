@@ -89,7 +89,7 @@ Steps never store a concrete element. A step says "click the Nth eligible target
 | Oracle | Fails when |
 | --- | --- |
 | `panic` | anything panics: a listener, render, a task or an invariant |
-| `livelock` | a step never settles: a task reschedules itself for 100,000 ticks, or a `proptest_target` lays out 1,000 times (a hover or layout change that undoes itself) |
+| `livelock` | a step never settles: a task reschedules itself for 100,000 ticks, or the window draws 1,000 frames in one step (a hover or layout change that undoes itself) |
 | `teardown` | closing the app panics, or GPUI's test scheduler reports non-determinism at the end of a case |
 | `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state |
 | `unique-ids` | two `proptest_target`s share an id path, so GPUI gives them one element state |
@@ -167,7 +167,7 @@ Cost grows linearly with the number of targets. With 2,000 targets a click costs
 ## Limitations
 
 - `kit` targets are aimed at their centre without a cover check: gpui-base does not expose their hitboxes. A `proptest_target` is hit-tested, aimed at a point no `occlude()` overlay covers, and skipped when covered everywhere.
-- The render-loop guard counts `proptest_target` elements only, not `kit` targets. A render loop in a view without them still hangs.
+- A window opened with `Harness::with_window` is not guarded against render loops unless its content is wrapped in `FrameGuard::new(..)`. `Harness::new` and `kit::harness` add the guard.
 
 ## Linux
 

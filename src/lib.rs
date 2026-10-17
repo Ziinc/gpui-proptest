@@ -31,6 +31,7 @@
 
 #[cfg(feature = "proptest")]
 mod engine;
+mod guard;
 mod harness;
 #[cfg(feature = "kit")]
 pub mod kit;
@@ -41,6 +42,7 @@ mod target;
 
 #[cfg(feature = "proptest")]
 pub use engine::Config;
+pub use guard::FrameGuard;
 pub use harness::{DEFAULT_KEYS, Harness};
 pub use outcome::{Failure, Outcome, Report, Trace};
 pub use state_machine::StateMachine;
