@@ -292,6 +292,27 @@ fn e_cross_case_leak() {
     assert!(report.is_nondeterministic(), "{report}");
 }
 
+// E2. The same with the determinism check off: the failure does not replay when
+// minimizing, and the report says the case is flaky instead of holding a pass.
+static FLAKY: AtomicU32 = AtomicU32::new(0);
+
+#[test]
+fn e_flaky_failure_without_determinism_check() {
+    let report = Harness::new(|_, cx| cx.new(|_| Plain))
+        .invariant("first run only", |_, _, _, _| {
+            ensure!(FLAKY.fetch_add(1, Ordering::SeqCst) != 0, "flaky");
+            Ok(())
+        })
+        .search(config().with_cases(4).with_check_determinism(false))
+        .expect_err("the first run fails");
+    assert!(report.is_nondeterministic(), "{report}");
+    assert_eq!(report.failure().message(), "flaky");
+    assert!(
+        report.to_string().contains("second run: passed"),
+        "{report}"
+    );
+}
+
 // G. A misspelled key in with_keys is reported as a bug in the view.
 #[derive(Default)]
 struct Plain;

@@ -141,7 +141,7 @@ Every element gpui-kit observes with `.test_support()` (checkboxes, switches, ta
 ## Determinism, replay and shrinking
 
 - Each case runs on a fresh `TestAppContext` built from `TestDispatcher::new(seed)`, the same machinery as `#[gpui::test(iterations, seed)]`. The step sequence and GPUI's task interleaving both replay exactly.
-- Before shrinking, the first failing case is replayed. A different outcome is reported as non-deterministic with both traces, and shrinking is skipped.
+- Before shrinking, the first failing case is replayed. A different outcome is reported as non-deterministic with both traces, and shrinking is skipped. With `Config::with_check_determinism(false)`, a shrunk case that passes when replayed is reported as non-deterministic too.
 - proptest shrinks the steps and their arguments. A second pass then removes runs and pairs of steps while the same oracle still fails, and tries scheduler seed 0.
 - Failures are saved to `proptest-regressions/` and replayed first on later runs (`Config::with_persist_failures(false)` turns this off).
 - `GPUI_PROPTEST_CASES` overrides the case count, `GPUI_PROPTEST_SEED` fixes the generator seed and `SEED` fixes the scheduler seed.

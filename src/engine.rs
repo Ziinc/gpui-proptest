@@ -150,6 +150,8 @@ where
 
         let original_steps = Cell::new(None);
         let nondeterministic = RefCell::new(None);
+        // proptest reports the last input that failed, so this is its outcome.
+        let last_failure = RefCell::new(None);
         let result = runner.run(&strategy, |(seed, steps)| {
             if nondeterministic.borrow().is_some() {
                 // Shrinking noise finds nothing; end it quickly.
@@ -159,6 +161,7 @@ where
             let Some(failure) = outcome.failure() else {
                 return Ok(());
             };
+            let message = failure.to_string();
             if original_steps.get().is_none() {
                 original_steps.set(Some(steps.len()));
                 if config.check_determinism {
@@ -173,7 +176,8 @@ where
                     }
                 }
             }
-            Err(TestCaseError::fail(failure.to_string()))
+            *last_failure.borrow_mut() = Some(outcome);
+            Err(TestCaseError::fail(message))
         });
 
         match result {
@@ -183,9 +187,25 @@ where
             }
             Err(TestError::Fail(_, (seed, steps))) => {
                 let original = original_steps.get().unwrap_or(steps.len());
-                let (_, steps, outcome) =
-                    self.minimize(seed, steps, config.max_shrink_iters, config.max_shrink_time);
-                Err(Box::new(Report::new(outcome, rust(&steps), original)))
+                let (_, minimal, outcome) = self.minimize(
+                    seed,
+                    steps.clone(),
+                    config.max_shrink_iters,
+                    config.max_shrink_time,
+                );
+                if outcome.is_ok() {
+                    // The failure did not replay: the determinism check is off and
+                    // the case is flaky.
+                    let first = last_failure
+                        .into_inner()
+                        .expect("a failing case recorded its outcome");
+                    return Err(Box::new(Report::nondeterministic(
+                        first,
+                        outcome,
+                        rust(&steps),
+                    )));
+                }
+                Err(Box::new(Report::new(outcome, rust(&minimal), original)))
             }
             Err(TestError::Abort(reason)) if reason.message().contains("local rejects") => panic!(
                 "gpui-proptest aborted: the domain action type's `Arbitrary` impl rejects \
