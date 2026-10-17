@@ -8,9 +8,9 @@ title: Troubleshooting
 
 A task reschedules itself forever without waiting on a timer, for example a loop that yields and spawns again. In a real app that is a CPU spin. Wait on `cx.background_executor().timer(..)` between iterations, or stop the loop when there is nothing to do.
 
-## `livelock: the window drew 1000 frames in one step`
+## `livelock: the window drew 1000 frames for one input event or timer`
 
-Rendering never settles. Usually a hover, size or layout change triggers a state change that undoes it, so the next frame flips it back. In a real app that shows as flicker. Look for `on_hover`, `on_resize` or measured-layout callbacks that call `cx.notify()` unconditionally.
+Rendering never settles. Usually a hover, size or layout change triggers a state change that undoes it, so the next frame flips it back. In a real app that shows as flicker. Animations that draw one frame per timer are fine: frames are counted per input event and per clock instant. Look for `on_hover`, `on_resize` or measured-layout callbacks that call `cx.notify()` unconditionally.
 
 ## `unique-ids: … is the id of more than one target`
 

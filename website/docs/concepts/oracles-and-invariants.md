@@ -11,11 +11,11 @@ An oracle is a check that holds for every GPUI view. An invariant is a check you
 | Oracle | Fails when | Turn off |
 | --- | --- | --- |
 | `panic` | anything panics: a listener, render, a task or an invariant | always on |
-| `livelock` | a step never settles: a task reschedules itself for 100,000 ticks, or the window draws 1,000 frames in one step | always on |
+| `livelock` | a step never settles: a task reschedules itself for 100,000 ticks, including one a timer wakes during `AdvanceClock`, or the window draws 1,000 frames for one input event or timer without the clock moving. An animation that draws one frame per timer is not a loop | always on |
 | `teardown` | closing the app panics, or GPUI's scheduler reports non-determinism | always on |
 | `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state | `with_disabled_is_inert(false)` |
 | `focus-is-visible` | a target that reports focus is not visible (gpui-kit targets report focus) | `with_focus_is_visible(false)` |
-| `unique-ids` | two `proptest_target`s share an id path | `with_unique_ids(false)` |
+| `unique-ids` | two painted `proptest_target`s share an id path (prepaints that are never painted, such as under `invisible()`, do not count) | `with_unique_ids(false)` |
 | `window-closed` | a step closes the window | `with_window_may_close(true)` |
 
 A panicking invariant is reported under the invariant's name, not as `panic`.
