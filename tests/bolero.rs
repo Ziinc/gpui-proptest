@@ -99,6 +99,20 @@ fn decoding_is_total_and_bounded() {
 }
 
 #[test]
+fn decoded_clock_steps_are_capped_like_proptest() {
+    let harness = harness(false);
+    let millis: Vec<u16> = (0..=u8::MAX)
+        .flat_map(|byte| harness.decode(&[byte; 256]).1)
+        .filter_map(|step| match step {
+            Step::AdvanceClock { millis } => Some(millis),
+            _ => None,
+        })
+        .collect();
+    assert!(!millis.is_empty());
+    assert!(millis.iter().all(|millis| *millis < 2_000), "{millis:?}");
+}
+
+#[test]
 fn domain_only_harnesses_decode_domain_steps() {
     let harness = harness(false)
         .with_domain(|_: &u8, _, _, _| true)

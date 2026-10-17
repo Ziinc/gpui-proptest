@@ -1,7 +1,10 @@
 //! The proptest engine: generates `(seed, steps)` inputs, runs them through
 //! [`Harness::run_case`], and shrinks failures.
 
-use crate::{Harness, ModifierKeys, Report, Step, step::rust};
+use crate::{
+    Harness, ModifierKeys, Report, Step,
+    step::{MAX_ADVANCE_MILLIS, rust},
+};
 use proptest::{
     collection::vec,
     prelude::*,
@@ -253,7 +256,7 @@ where
                 (10, text.prop_map(|text| Step::Type { text }).boxed()),
                 (
                     5,
-                    (0u16..2_000)
+                    (0..MAX_ADVANCE_MILLIS)
                         .prop_map(|millis| Step::AdvanceClock { millis })
                         .boxed(),
                 ),

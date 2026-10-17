@@ -266,6 +266,41 @@ fn d_periodic_timer() {
     assert!(outcome.contains("failure: None"), "{outcome}");
 }
 
+// D2. A 60 fps timer animation draws a frame per timer, thousands in one long
+// AdvanceClock; that is not a render loop.
+struct Animation(u32);
+impl Render for Animation {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.0.to_string())
+    }
+}
+
+#[test]
+fn d_long_animation_is_not_a_render_loop() {
+    let outcome = Harness::new(|_, cx| {
+        cx.new(|cx: &mut Context<Animation>| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    let frame = this.update(cx, |animation, cx| {
+                        animation.0 += 1;
+                        cx.notify();
+                    });
+                    if frame.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            Animation(0)
+        })
+    })
+    .run_case(0, &[Step::AdvanceClock { millis: 20_000 }]);
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
 // E. State that leaks across cases through a static: the replay differs.
 static LEAK: AtomicU32 = AtomicU32::new(0);
 struct Leaky;
@@ -535,5 +570,5 @@ fn t_untargeted_layout_shift_on_hover() {
     });
     let (oracle, message) = failure.expect("the render loop is reported");
     assert_eq!(oracle, "livelock");
-    assert!(message.contains("frames in one step"), "{message}");
+    assert!(message.contains("frames for one input event"), "{message}");
 }
