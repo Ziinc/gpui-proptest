@@ -1,6 +1,6 @@
 use gpui::{
-    App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Window, WindowId, px,
+    App, Bounds, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, Pixels, Point, Window, WindowId, point, px,
 };
 use std::{
     cell::RefCell,
@@ -20,6 +20,7 @@ pub struct TargetInfo {
     role: Option<gpui::Role>,
     label: Option<String>,
     state: String,
+    click_point: Option<Point<Pixels>>,
 }
 
 impl TargetInfo {
@@ -34,6 +35,7 @@ impl TargetInfo {
             role: None,
             label: None,
             state: String::new(),
+            click_point: Some(bounds.center()),
         }
     }
 
@@ -72,6 +74,19 @@ impl TargetInfo {
     pub fn with_state(mut self, state: String) -> Self {
         self.state = state;
         self
+    }
+
+    /// Sets where pointer steps aim, or `None` when another element covers the
+    /// whole target. Defaults to the centre of the bounds.
+    pub fn with_click_point(mut self, click_point: Option<Point<Pixels>>) -> Self {
+        self.click_point = click_point;
+        self
+    }
+
+    /// Where pointer steps aim: a point on the target that no other element
+    /// covers, or `None` when the target is covered everywhere.
+    pub fn click_point(&self) -> Option<Point<Pixels>> {
+        self.click_point
     }
 
     /// The GPUI element path, root first.
@@ -156,12 +171,45 @@ impl TargetSource for ObservedTargets {
                     entries
                         .values()
                         .filter_map(Weak::upgrade)
-                        .map(|entry| entry.facts.borrow().clone())
+                        .map(|entry| {
+                            let facts = entry.facts.borrow().clone();
+                            match &*entry.hitbox.borrow() {
+                                Some(hitbox) => {
+                                    let click_point = uncovered_point(hitbox, window);
+                                    facts.with_click_point(click_point)
+                                }
+                                None => facts,
+                            }
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
         })
     }
+}
+
+/// The centre of the hitbox if nothing covers it, else the first uncovered point
+/// on a 3×3 grid. GPUI routes a click to every hitbox under the pointer down to
+/// the first one that blocks the mouse (`occlude`), so a covered point would send
+/// the click to whatever covers it.
+fn uncovered_point(hitbox: &Hitbox, window: &Window) -> Option<Point<Pixels>> {
+    let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+    if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+        return None;
+    }
+    let at = |x: f32, y: f32| {
+        point(
+            bounds.origin.x + bounds.size.width * x,
+            bounds.origin.y + bounds.size.height * y,
+        )
+    };
+    std::iter::once(at(0.5, 0.5))
+        .chain(
+            [1. / 6., 0.5, 5. / 6.]
+                .into_iter()
+                .flat_map(|y| [1. / 6., 0.5, 5. / 6.].map(|x| at(x, y))),
+        )
+        .find(|position| hitbox.is_hovered_at(*position, window))
 }
 
 /// Orders targets top to bottom, then left to right, then by path, so a target
@@ -205,6 +253,7 @@ pub struct Registration {
     window: WindowId,
     global_id: GlobalElementId,
     facts: RefCell<TargetInfo>,
+    hitbox: RefCell<Option<Hitbox>>,
 }
 
 impl Drop for Registration {
@@ -331,6 +380,7 @@ impl<E: Element> Element for Target<E> {
                         window: window.window_handle().window_id(),
                         global_id: global_id.clone(),
                         facts: RefCell::new(facts.clone()),
+                        hitbox: RefCell::new(None),
                     })
                 });
                 *registration.facts.borrow_mut() = facts;
@@ -343,11 +393,14 @@ impl<E: Element> Element for Target<E> {
                 });
                 (registration.clone(), registration)
             });
-        (
-            self.inner
-                .prepaint(id, inspector, bounds, layout, window, cx),
-            registration,
-        )
+        let inner = self
+            .inner
+            .prepaint(id, inspector, bounds, layout, window, cx);
+        // Inserted after the element's own content, so only elements painted later
+        // (siblings, overlays, deferred popovers) can cover it.
+        *registration.hitbox.borrow_mut() =
+            Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
+        (inner, registration)
     }
 
     fn paint(

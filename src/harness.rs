@@ -330,7 +330,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         target: Option<&TargetInfo>,
         key: Option<&str>,
     ) -> Result<bool, Failure> {
-        let center = target.map(|target| target.bounds().center());
+        let center = target.and_then(TargetInfo::click_point);
         match step {
             Step::Click { modifiers, .. } => click(
                 cx,
@@ -525,7 +525,9 @@ fn default_sources() -> Vec<Rc<dyn TargetSource>> {
 }
 
 fn is_eligible(verb: Verb, target: &TargetInfo) -> bool {
-    target.is_visible() && (verb == Verb::Click || !target.is_disabled())
+    target.is_visible()
+        && target.click_point().is_some()
+        && (verb == Verb::Click || !target.is_disabled())
 }
 
 /// Completes a frame. Returns `false` once the window has closed.
