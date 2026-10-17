@@ -3,7 +3,7 @@ use gpui::{
     IntoElement, LayoutId, Pixels, Point, Window, WindowId, point, px,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     fmt,
     rc::{Rc, Weak},
@@ -240,9 +240,17 @@ pub(crate) fn begin_step() {
     PREPAINTS.with(|counts| counts.borrow_mut().clear());
 }
 
+thread_local! { static DUPLICATES: RefCell<Vec<Vec<ElementId>>> = const { RefCell::new(Vec::new()) }; }
+
+/// Paths that more than one target used in the same frame, since the last call.
+pub(crate) fn take_duplicates() -> Vec<Vec<ElementId>> {
+    DUPLICATES.with(|duplicates| std::mem::take(&mut *duplicates.borrow_mut()))
+}
+
 /// Forgets every registration. Each case builds a new app whose window ids may repeat.
 pub(crate) fn clear_registry() {
     REGISTRY.with(|registry| registry.borrow_mut().clear());
+    take_duplicates();
     begin_step();
 }
 
@@ -254,6 +262,9 @@ pub struct Registration {
     global_id: GlobalElementId,
     facts: RefCell<TargetInfo>,
     hitbox: RefCell<Option<Hitbox>>,
+    /// Prepaints since the last paint. Elements with the same id share element
+    /// state, so a second prepaint before the first paint means a duplicate id.
+    unpainted: Cell<u32>,
 }
 
 impl Drop for Registration {
@@ -381,6 +392,7 @@ impl<E: Element> Element for Target<E> {
                         global_id: global_id.clone(),
                         facts: RefCell::new(facts.clone()),
                         hitbox: RefCell::new(None),
+                        unpainted: Cell::new(0),
                     })
                 });
                 *registration.facts.borrow_mut() = facts;
@@ -393,6 +405,11 @@ impl<E: Element> Element for Target<E> {
                 });
                 (registration.clone(), registration)
             });
+        let unpainted = registration.unpainted.get() + 1;
+        registration.unpainted.set(unpainted);
+        if unpainted == 2 {
+            DUPLICATES.with(|duplicates| duplicates.borrow_mut().push(global_id.to_vec()));
+        }
         let inner = self
             .inner
             .prepaint(id, inspector, bounds, layout, window, cx);
@@ -416,6 +433,7 @@ impl<E: Element> Element for Target<E> {
         let clipped = bounds
             .intersect(&window.content_mask().bounds)
             .intersect(&Bounds::new(Default::default(), window.viewport_size()));
+        prepaint.1.unpainted.set(0);
         prepaint.1.facts.borrow_mut().visible =
             clipped.size.width > px(0.) && clipped.size.height > px(0.);
         self.inner

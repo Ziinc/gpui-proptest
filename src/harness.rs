@@ -55,6 +55,7 @@ pub struct Harness<V: 'static, A: 'static = NoDomain> {
     sources: Vec<Rc<dyn TargetSource>>,
     disabled_is_inert: bool,
     focus_is_visible: bool,
+    unique_ids: bool,
     ui_steps: bool,
 }
 
@@ -95,6 +96,7 @@ impl<V: 'static> Harness<V> {
             sources: default_sources(),
             disabled_is_inert: true,
             focus_is_visible: true,
+            unique_ids: true,
             ui_steps: true,
         }
     }
@@ -151,6 +153,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             sources: self.sources,
             disabled_is_inert: self.disabled_is_inert,
             focus_is_visible: self.focus_is_visible,
+            unique_ids: self.unique_ids,
             ui_steps: self.ui_steps,
         }
     }
@@ -172,6 +175,14 @@ impl<V: 'static, A: 'static> Harness<V, A> {
     /// reports focus may be invisible. Only sources that report focus feed it.
     pub fn with_focus_is_visible(mut self, enabled: bool) -> Self {
         self.focus_is_visible = enabled;
+        self
+    }
+
+    /// Turns the unique-ids oracle on or off. On by default: no two targets may
+    /// share an id path, since GPUI gives them one element state and only one of
+    /// them can be chosen.
+    pub fn with_unique_ids(mut self, enabled: bool) -> Self {
+        self.unique_ids = enabled;
         self
     }
 
@@ -436,9 +447,21 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         step: Option<usize>,
         disabled_click: Option<(TargetInfo, Vec<TargetInfo>)>,
     ) -> Result<(), Failure> {
+        let duplicates = target::take_duplicates();
         let Some(targets) = self.targets(cx, window) else {
             return Ok(());
         };
+
+        if self.unique_ids
+            && let Some(path) = duplicates.first()
+        {
+            let name = TargetInfo::new(path.clone(), Bounds::default()).name();
+            return Err(Failure::from_oracle(
+                "unique-ids",
+                format!("{name} is the id of more than one target; GPUI gives them one shared element state"),
+            )
+            .at_step(step));
+        }
 
         if self.focus_is_visible
             && let Some(target) = targets
