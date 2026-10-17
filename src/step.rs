@@ -36,6 +36,9 @@ pub enum Step<A = NoDomain> {
     Domain(A),
 }
 
+/// Generated [`Step::AdvanceClock`] steps advance the clock by less than this.
+pub(crate) const MAX_ADVANCE_MILLIS: u16 = 2_000;
+
 /// Modifier keys held during a click.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Arbitrary)]
 pub struct ModifierKeys {

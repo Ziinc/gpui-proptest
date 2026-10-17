@@ -1,15 +1,15 @@
-use crate::target::{self, FRAME_LIMIT, LIVELOCK, STEP};
+use crate::target::{self, FRAME_LIMIT, FrameWindow, LIVELOCK};
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Element, ElementId, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, Pixels, Render, Window,
 };
 use std::{cell::Cell, panic::Location};
 
-thread_local! { static FRAMES: Cell<(u64, u32)> = const { Cell::new((0, 0)) }; }
+thread_local! { static FRAMES: Cell<Option<(FrameWindow, u32)>> = const { Cell::new(None) }; }
 
 /// Wraps a window's content and fails the case with `livelock` when the window
-/// draws [`FRAME_LIMIT`] frames within one step, such as a hover or layout change
-/// that undoes itself. [`Harness::new`](crate::Harness::new) and
+/// draws [`FRAME_LIMIT`] frames for one input event or timer, such as a hover or
+/// layout change that undoes itself. [`Harness::new`](crate::Harness::new) and
 /// `kit::harness` add it; wrap the content yourself when opening the window with
 /// [`Harness::with_window`](crate::Harness::with_window).
 ///
@@ -66,18 +66,12 @@ impl Element for FrameGuard {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let step = STEP.with(Cell::get);
-        let frames = match FRAMES.with(Cell::get) {
-            (seen, frames) if seen == step => frames + 1,
-            _ => 1,
-        };
-        FRAMES.with(|cell| cell.set((step, frames)));
-        if frames > FRAME_LIMIT {
+        if FRAMES.with(|frames| target::count_frame(frames, cx)) > FRAME_LIMIT {
             // Later frames while the panic unwinds count afresh.
             target::begin_step();
             panic!(
-                "{LIVELOCK}: the window drew {FRAME_LIMIT} frames in one step; rendering \
-                 never settles, such as a hover or layout change that undoes itself"
+                "{LIVELOCK}: the window drew {FRAME_LIMIT} frames for one input event or timer; \
+                 rendering never settles, such as a hover or layout change that undoes itself"
             );
         }
         self.child.prepaint(window, cx);

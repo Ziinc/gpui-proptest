@@ -1,7 +1,10 @@
 //! Byte-driven cases for coverage-guided and random-byte engines such as bolero,
 //! cargo-fuzz and AFL.
 
-use crate::{Harness, Report, Step, step::rust};
+use crate::{
+    Harness, Report, Step,
+    step::{MAX_ADVANCE_MILLIS, rust},
+};
 use arbitrary::{Arbitrary, Unstructured};
 use std::{fmt::Debug, time::Duration};
 
@@ -51,7 +54,8 @@ where
     }
 
     /// The `(seed, steps)` input `bytes` decode to. Decoding never fails: missing
-    /// bytes read as zeros and end the steps.
+    /// bytes read as zeros and end the steps. `AdvanceClock` steps advance less
+    /// than 2 s, as proptest generates them.
     pub fn decode(&self, bytes: &[u8]) -> (u64, Vec<Step<A>>) {
         let mut input = Unstructured::new(bytes);
         let seed = u64::arbitrary(&mut input).unwrap_or(0);
@@ -63,6 +67,10 @@ where
                 A::arbitrary(&mut input).map(Step::Domain)
             };
             match step {
+                // Capped like proptest's steps: a minute of animation is not a step.
+                Ok(Step::AdvanceClock { millis }) => steps.push(Step::AdvanceClock {
+                    millis: millis % MAX_ADVANCE_MILLIS,
+                }),
                 Ok(step) => steps.push(step),
                 Err(_) => break,
             }

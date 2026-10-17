@@ -719,6 +719,7 @@ fn dispatch(
     event: impl InputEvent,
 ) -> Result<(), Failure> {
     let input = event.to_platform_input();
+    target::begin_step();
     let _ = cx.update_window(window, |_, window, cx| {
         window.dispatch_event(input, cx);
     });
@@ -733,6 +734,7 @@ fn press(
     window: AnyWindowHandle,
     keystroke: Keystroke,
 ) -> Result<bool, Failure> {
+    target::begin_step();
     let open = cx
         .update_window(window, |_, window, cx| {
             window.dispatch_keystroke(keystroke, cx);

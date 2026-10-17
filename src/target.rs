@@ -7,6 +7,7 @@ use std::{
     collections::HashMap,
     fmt,
     rc::{Rc, Weak},
+    time::Instant,
 };
 
 /// An element the runner can act on, as painted in the last frame.
@@ -276,13 +277,31 @@ thread_local! { static PREPAINTS: Cell<u64> = const { Cell::new(0) }; }
 /// Prefixes the panic a render loop raises, so the harness reports it as `livelock`.
 pub(crate) const LIVELOCK: &str = "livelock";
 
-/// How often one target may lay out within a single step before the step counts
-/// as a render loop. A step draws a handful of frames; a feedback loop draws forever.
+/// How often one target may lay out for one input event or timer before it counts
+/// as a render loop. An event draws a handful of frames; a feedback loop draws
+/// forever without the clock moving.
 pub(crate) const FRAME_LIMIT: u32 = 1_000;
 
-/// Starts counting frames for a new step.
+/// Starts counting frames afresh, for a new step or input event.
 pub(crate) fn begin_step() {
     STEP.with(|step| step.set(step.get() + 1));
+}
+
+/// Where frames are counted: since the last [`begin_step`], at one instant of
+/// GPUI's clock. Timers fire at distinct instants, so an animation that draws a
+/// frame per timer never piles up, while a render loop draws without time passing.
+pub(crate) type FrameWindow = (u64, Instant);
+
+/// Counts a frame in `counter` and returns how many it holds for the current
+/// window.
+pub(crate) fn count_frame(counter: &Cell<Option<(FrameWindow, u32)>>, cx: &App) -> u32 {
+    let window = (STEP.with(Cell::get), cx.background_executor().now());
+    let frames = match counter.get() {
+        Some((seen, frames)) if seen == window => frames + 1,
+        _ => 1,
+    };
+    counter.set(Some((window, frames)));
+    frames
 }
 
 thread_local! { static DUPLICATES: RefCell<Vec<Vec<ElementId>>> = const { RefCell::new(Vec::new()) }; }
@@ -313,8 +332,8 @@ pub struct Registration {
     /// Prepaints that are never painted, such as inside an invisible parent or a
     /// `list` that prepaints again after autoscrolling, are not duplicates.
     last_prepaint: Cell<u64>,
-    /// The step this target was last laid out in, and how often within it.
-    frames: Cell<(u64, u32)>,
+    /// Where this target was last laid out, and how often there.
+    frames: Cell<Option<(FrameWindow, u32)>>,
 }
 
 impl Drop for Registration {
@@ -430,7 +449,7 @@ impl<E: Element> Element for Target<E> {
                         facts: RefCell::new(facts.clone()),
                         hitbox: RefCell::new(None),
                         last_prepaint: Cell::new(0),
-                        frames: Cell::new((0, 0)),
+                        frames: Cell::new(None),
                     })
                 });
                 *registration.facts.borrow_mut() = facts;
@@ -443,18 +462,12 @@ impl<E: Element> Element for Target<E> {
                 });
                 (registration.clone(), registration)
             });
-        let step = STEP.with(Cell::get);
-        let frames = match registration.frames.get() {
-            (seen, frames) if seen == step => frames + 1,
-            _ => 1,
-        };
-        registration.frames.set((step, frames));
-        if frames > FRAME_LIMIT {
+        if count_frame(&registration.frames, cx) > FRAME_LIMIT {
             // Later layouts while the panic unwinds count afresh, so they cannot
             // panic again.
             begin_step();
             panic!(
-                "{LIVELOCK}: {global_id:?} was laid out {FRAME_LIMIT} times in one step; \
+                "{LIVELOCK}: {global_id:?} was laid out {FRAME_LIMIT} times for one input event or timer; \
                  rendering never settles, such as a hover or layout change that undoes itself"
             );
         }
