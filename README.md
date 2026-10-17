@@ -94,7 +94,7 @@ Steps never store a concrete element. A step says "click the Nth eligible target
 | `panic` | anything panics: a listener, render, a task or an invariant |
 | `livelock` | a step never settles: a task reschedules itself for 100,000 ticks (including one a timer wakes during `AdvanceClock`), or the window draws 1,000 frames for one input event or timer without GPUI's clock moving (a hover or layout change that undoes itself). An animation that draws a frame per timer is not a loop |
 | `teardown` | closing the app panics, or GPUI's test scheduler reports non-determinism at the end of a case |
-| `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state |
+| `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state. State is compared from after the pointer moves onto the target, so hover effects do not count |
 | `unique-ids` | two `proptest_target`s with the same id path are painted in one frame, so GPUI gives them one element state. A target prepainted but not painted, such as inside an `invisible()` parent, does not count |
 | `window-closed` | a step closes the window; allow it with `with_window_may_close(true)`, which ends the case and records the rest as not run |
 | `focus-is-visible` | a target that reports focus is not visible (with `kit`, which reports focus) |
@@ -142,7 +142,7 @@ Every element gpui-kit observes with `.test_support()` (checkboxes, switches, ta
 
 - Each case runs on a fresh `TestAppContext` built from `TestDispatcher::new(seed)`, the same machinery as `#[gpui::test(iterations, seed)]`. The step sequence and GPUI's task interleaving both replay exactly.
 - Before shrinking, the first failing case is replayed. A different outcome is reported as non-deterministic with both traces, and shrinking is skipped. With `Config::with_check_determinism(false)`, a shrunk case that passes when replayed is reported as non-deterministic too.
-- proptest shrinks the steps and their arguments. A second pass then removes runs and pairs of steps while the same oracle still fails, and tries scheduler seed 0.
+- proptest shrinks the steps and their arguments. A second pass then removes runs and pairs of steps while the same oracle still fails with the same message, and tries scheduler seed 0.
 - Failures are saved to `proptest-regressions/` and replayed first on later runs (`Config::with_persist_failures(false)` turns this off).
 - `GPUI_PROPTEST_CASES` overrides the case count, `GPUI_PROPTEST_SEED` fixes the generator seed and `SEED` fixes the scheduler seed.
 

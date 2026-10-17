@@ -172,11 +172,22 @@ impl fmt::Debug for Trace {
 pub struct Outcome {
     trace: Trace,
     failure: Option<Failure>,
+    reached: usize,
 }
 
 impl Outcome {
-    pub(crate) fn new(trace: Trace, failure: Option<Failure>) -> Self {
-        Self { trace, failure }
+    pub(crate) fn new(trace: Trace, failure: Option<Failure>, reached: usize) -> Self {
+        Self {
+            trace,
+            failure,
+            reached,
+        }
+    }
+
+    /// How many steps the case started, including one whose targets failed to
+    /// read before it ran. Replaying that many steps reproduces the outcome.
+    pub(crate) fn reached(&self) -> usize {
+        self.reached
     }
 
     pub fn trace(&self) -> &Trace {

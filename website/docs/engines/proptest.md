@@ -61,7 +61,7 @@ Domain actions are decoded from up to 64 random bytes with `arbitrary`. The same
 3. proptest removes steps one at a time in a single pass. That stalls when two steps must go together, such as an increment and the decrement that cancels it. gpui-proptest then deletes contiguous runs of every length, and every pair of steps for traces of 16 steps or fewer, until nothing more can go.
 4. It finally tries scheduler seed 0, which shows whether the failure depends on task order at all.
 
-Only candidates that fail with the **same oracle** are kept, so a shrink never swaps your bug for a different one.
+Only candidates that fail with the **same oracle and message** are kept, so a shrink never swaps your bug for a different one.
 
 ## Saved regressions
 
