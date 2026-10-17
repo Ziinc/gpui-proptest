@@ -1,5 +1,7 @@
 # gpui-proptest
 
+**Docs and guides:** <https://ziinc.github.io/gpui-proptest/> (source in [`website/`](website)).
+
 Property-based testing for [GPUI](https://www.gpui.rs). gpui-proptest clicks, types and presses keys at random in a real GPUI window. It checks oracles and your invariants after every step. When something fails, it shrinks the sequence to the shortest one that still fails and prints a regression test you can paste.
 
 ```text
