@@ -42,6 +42,7 @@ gpui-proptest uses `gpui-pre =0.3.9`, the snapshot that gpui-kit 0.7.3 is built 
 | Feature | Default | Adds |
 | --- | --- | --- |
 | `proptest` | yes | `Harness::check` and `Harness::search`: generation, shrinking, `proptest-regressions/` |
+| `bolero` | no | `fuzz!`: run a harness under bolero's random, libFuzzer, AFL or honggfuzz engines |
 | `kit` | no | gpui-kit elements observed with `.test_support()` become targets; `kit::harness` opens windows through `gpui_kit::open_window` |
 
 ## Smoke test any view
@@ -145,13 +146,24 @@ Every element gpui-kit observes with `.test_support()` (checkboxes, switches, ta
 
 ## Engines
 
-The core never imports proptest. `Harness::run_case(seed, &steps)` replays one input and returns an `Outcome`, and `Step` derives `arbitrary::Arbitrary`, so a [bolero](https://github.com/camshaft/bolero) or cargo-fuzz driver can call the same entry point:
+The core never imports an engine. `Harness::run_case(seed, &steps)` replays one input, and `Harness::fuzz(bytes)` decodes one from bytes, so any engine can drive a harness.
+
+- **proptest** (default feature): `check` and `search` generate cases from weighted step strategies, shrink with proptest, then delete runs and pairs of steps, and persist failures to `proptest-regressions/`.
+- **bolero** (`bolero` feature): `fuzz!` runs the harness under [bolero](https://github.com/camshaft/bolero). `cargo test` feeds it random bytes; `cargo bolero test` runs libFuzzer, AFL or honggfuzz with coverage guidance. bolero shrinks the bytes, and the steps they decode to are minimized like proptest's before the report prints.
 
 ```rust
-bolero::check!()
-    .with_arbitrary::<(u64, Vec<Step>)>()
-    .for_each(|(seed, steps)| assert!(harness().run_case(*seed, steps).is_ok()));
+#[test]
+fn counter_fuzz() {
+    gpui_proptest::fuzz!(harness());
+}
+
+#[test]
+fn counter_fuzz_longer() {
+    gpui_proptest::fuzz!(harness(), |check| check.with_iterations(10_000));
+}
 ```
+
+One input decodes to a scheduler seed and at most `MAX_FUZZ_STEPS` steps. A harness without UI steps, such as `from_state_machine`, decodes domain actions only.
 
 ## Speed
 
