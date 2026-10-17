@@ -1,0 +1,587 @@
+use crate::{
+    outcome::{Failure, Outcome, Trace},
+    step::{NoDomain, Step, StepRecord, Verb},
+    target::{self, ObservedTargets, TargetInfo, TargetSource},
+};
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, Bounds, Entity, InputEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, TestAppContext,
+    TestDispatcher, TouchPhase, Window, WindowBounds, WindowOptions, point, px, size,
+};
+use std::{
+    any::Any,
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    fmt::Debug,
+    panic::{self, AssertUnwindSafe},
+    rc::Rc,
+    sync::Once,
+    time::Duration,
+};
+
+/// Keys a [`Step::Press`] chooses from when the harness sets none.
+pub const DEFAULT_KEYS: &[&str] = &[
+    "tab",
+    "shift-tab",
+    "enter",
+    "escape",
+    "space",
+    "backspace",
+    "left",
+    "right",
+    "up",
+    "down",
+];
+
+type Open<V> = Rc<dyn Fn(&mut App) -> (AnyWindowHandle, Entity<V>)>;
+type Setup = Rc<dyn Fn(&mut App)>;
+type Invariant<V> =
+    Rc<dyn Fn(&Entity<V>, &[TargetInfo], &mut Window, &mut App) -> Result<(), Failure>>;
+type Perform<V, A> = Rc<dyn Fn(&A, &Entity<V>, &mut Window, &mut App) -> bool>;
+
+/// What one run drives: how to open the view, which keys to press, which domain
+/// actions exist, and what must hold after every step.
+///
+/// The harness is engine-neutral. [`Harness::run_case`] replays one `(seed, steps)`
+/// input; the `proptest` feature adds [`Harness::check`], which generates inputs
+/// and shrinks failures.
+pub struct Harness<V: 'static, A: 'static = NoDomain> {
+    open: Open<V>,
+    setup: Vec<Setup>,
+    keys: Vec<String>,
+    invariants: Vec<(String, Invariant<V>)>,
+    domain: Option<Perform<V, A>>,
+    sources: Vec<Rc<dyn TargetSource>>,
+    disabled_is_inert: bool,
+    focus_is_visible: bool,
+    ui_steps: bool,
+}
+
+impl<V: Render + 'static> Harness<V> {
+    /// Opens `build`'s view as the root of an 800×600 test window.
+    pub fn new(build: impl Fn(&mut Window, &mut App) -> Entity<V> + 'static) -> Self {
+        Self::with_window(move |cx| {
+            let mut root = None;
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.), px(0.)),
+                    size(px(800.), px(600.)),
+                ))),
+                ..Default::default()
+            };
+            let handle = cx
+                .open_window(options, |window, cx| {
+                    let view = build(window, cx);
+                    root = Some(view.clone());
+                    view
+                })
+                .expect("open test window");
+            (handle.into(), root.expect("window built its root view"))
+        })
+    }
+}
+
+impl<V: 'static> Harness<V> {
+    /// Opens the window with `open`, for roots the harness does not build itself,
+    /// such as `gpui_kit::open_window`.
+    pub fn with_window(open: impl Fn(&mut App) -> (AnyWindowHandle, Entity<V>) + 'static) -> Self {
+        Self {
+            open: Rc::new(open),
+            setup: Vec::new(),
+            keys: DEFAULT_KEYS.iter().map(|key| key.to_string()).collect(),
+            invariants: Vec::new(),
+            domain: None,
+            sources: default_sources(),
+            disabled_is_inert: true,
+            focus_is_visible: true,
+            ui_steps: true,
+        }
+    }
+}
+
+impl<V: 'static, A: 'static> Harness<V, A> {
+    /// Runs `setup` on each new app before the window opens, such as `gpui_kit::init`.
+    pub fn with_setup(mut self, setup: impl Fn(&mut App) + 'static) -> Self {
+        self.setup.push(Rc::new(setup));
+        self
+    }
+
+    /// Replaces the keys [`Step::Press`] chooses from, as GPUI keystroke strings
+    /// such as `"cmd-z"`. The first key is the one shrinking prefers.
+    pub fn with_keys<S: Into<String>>(mut self, keys: impl IntoIterator<Item = S>) -> Self {
+        self.keys = keys.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Adds a named invariant, checked once the window opens and after every step.
+    pub fn invariant(
+        mut self,
+        name: impl Into<String>,
+        check: impl Fn(&Entity<V>, &[TargetInfo], &mut Window, &mut App) -> Result<(), Failure>
+        + 'static,
+    ) -> Self {
+        self.invariants.push((name.into(), Rc::new(check)));
+        self
+    }
+
+    /// Sets how domain actions are performed. Return `false` when the action does
+    /// not apply in the current state; the step is then recorded as skipped.
+    pub fn with_domain<B: 'static>(
+        self,
+        perform: impl Fn(&B, &Entity<V>, &mut Window, &mut App) -> bool + 'static,
+    ) -> Harness<V, B> {
+        Harness {
+            open: self.open,
+            setup: self.setup,
+            keys: self.keys,
+            invariants: self.invariants,
+            domain: Some(Rc::new(perform)),
+            sources: self.sources,
+            disabled_is_inert: self.disabled_is_inert,
+            focus_is_visible: self.focus_is_visible,
+            ui_steps: self.ui_steps,
+        }
+    }
+
+    /// Adds a source of targets besides the defaults.
+    pub fn with_target_source(mut self, source: impl TargetSource) -> Self {
+        self.sources.push(Rc::new(source));
+        self
+    }
+
+    /// Turns the disabled-is-inert oracle on or off. On by default: clicking a
+    /// disabled target must not change any target's state fingerprint.
+    pub fn with_disabled_is_inert(mut self, enabled: bool) -> Self {
+        self.disabled_is_inert = enabled;
+        self
+    }
+
+    /// Turns the focus-is-visible oracle on or off. On by default: no target that
+    /// reports focus may be invisible. Only sources that report focus feed it.
+    pub fn with_focus_is_visible(mut self, enabled: bool) -> Self {
+        self.focus_is_visible = enabled;
+        self
+    }
+
+    /// Whether engines generate generic UI steps (clicks, keys, text, clock). On by
+    /// default; [`Harness::from_state_machine`] turns them off.
+    pub fn with_ui_steps(mut self, enabled: bool) -> Self {
+        self.ui_steps = enabled;
+        self
+    }
+
+    pub(crate) fn has_ui_steps(&self) -> bool {
+        self.ui_steps
+    }
+
+    pub(crate) fn has_domain(&self) -> bool {
+        self.domain.is_some()
+    }
+
+    /// Runs one case: a fresh app on a `TestDispatcher` seeded with `seed`, then
+    /// `steps` in order, with every oracle and invariant checked after each step.
+    /// The same input always gives the same outcome.
+    pub fn run_case(&self, seed: u64, steps: &[Step<A>]) -> Outcome
+    where
+        A: Debug,
+    {
+        install_quiet_panic_hook();
+        target::clear_registry();
+        let trace = RefCell::new(Trace::new(seed));
+        let dispatcher = TestDispatcher::new(seed);
+        let scheduler = dispatcher.scheduler().clone();
+        let mut cx = TestAppContext::build(dispatcher, None);
+
+        let result = quietly(|| {
+            panic::catch_unwind(AssertUnwindSafe(|| self.drive(&mut cx, steps, &trace)))
+        });
+        let last_step = trace.borrow().records().len().checked_sub(1);
+        let mut failure = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(failure)) => Some(failure),
+            Err(payload) => Some(
+                Failure::from_oracle("panic", panic_message(payload.as_ref())).at_step(last_step),
+            ),
+        };
+
+        let teardown = quietly(|| {
+            panic::catch_unwind(AssertUnwindSafe(move || {
+                cx.quit();
+                drop(cx);
+                scheduler.end_test();
+            }))
+        });
+        if let (Err(payload), None) = (teardown, &failure) {
+            failure = Some(
+                Failure::from_oracle("scheduler", panic_message(payload.as_ref()))
+                    .at_step(last_step),
+            );
+        }
+        target::clear_registry();
+        Outcome::new(trace.into_inner(), failure)
+    }
+
+    /// Runs one case and panics with its trace if it fails. Emitted regression
+    /// tests call this.
+    #[track_caller]
+    pub fn replay(&self, seed: u64, steps: &[Step<A>])
+    where
+        A: Debug,
+    {
+        let outcome = self.run_case(seed, steps);
+        if let Some(failure) = outcome.failure() {
+            panic!("{failure}\n\n{:?}", outcome.trace());
+        }
+    }
+
+    fn drive(
+        &self,
+        cx: &mut TestAppContext,
+        steps: &[Step<A>],
+        trace: &RefCell<Trace>,
+    ) -> Result<(), Failure>
+    where
+        A: Debug,
+    {
+        for setup in &self.setup {
+            cx.update(|cx| setup(cx));
+        }
+        let (window, view) = cx.update(|cx| (self.open)(cx));
+        cx.run_until_parked();
+        if !render(cx, window) {
+            return Ok(());
+        }
+        self.check_oracles(cx, window, &view, None, None)?;
+
+        for (index, step) in steps.iter().enumerate() {
+            let Some(targets) = self.targets(cx, window) else {
+                return Ok(());
+            };
+            let verb = step.verb();
+            let target = step.target_choice().and_then(|choice| {
+                let eligible: Vec<_> = targets
+                    .iter()
+                    .filter(|target| is_eligible(verb, target))
+                    .collect();
+                (!eligible.is_empty()).then(|| eligible[choice as usize % eligible.len()].clone())
+            });
+            let key = match step {
+                Step::Press { key } if !self.keys.is_empty() => {
+                    Some(self.keys[*key as usize % self.keys.len()].clone())
+                }
+                _ => None,
+            };
+            let skipped = match step {
+                Step::Press { .. } => key.is_none(),
+                Step::Domain(_) => self.domain.is_none(),
+                _ => verb != Verb::Untargeted && target.is_none(),
+            };
+            trace.borrow_mut().push(StepRecord::new(
+                step.to_rust(),
+                step.describe(
+                    target.as_ref().map(|target| target.name()).as_deref(),
+                    key.as_deref(),
+                ),
+                skipped,
+            ));
+            if skipped {
+                continue;
+            }
+
+            let before = (self.disabled_is_inert
+                && verb == Verb::Click
+                && target.as_ref().is_some_and(TargetInfo::is_disabled))
+            .then(|| (target.clone().unwrap(), targets.clone()));
+
+            let performed = self.perform(cx, window, &view, step, target.as_ref(), key.as_deref());
+            if !performed {
+                trace.borrow_mut().mark_last_skipped();
+                continue;
+            }
+            cx.run_until_parked();
+            if !render(cx, window) {
+                return Ok(());
+            }
+            self.check_oracles(cx, window, &view, Some(index), before)?;
+        }
+        Ok(())
+    }
+
+    fn perform(
+        &self,
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        view: &Entity<V>,
+        step: &Step<A>,
+        target: Option<&TargetInfo>,
+        key: Option<&str>,
+    ) -> bool {
+        let center = target.map(|target| target.bounds().center());
+        match step {
+            Step::Click { modifiers, .. } => click(
+                cx,
+                window,
+                center.unwrap(),
+                MouseButton::Left,
+                1,
+                modifiers.to_gpui(),
+            ),
+            Step::DoubleClick { .. } => {
+                let position = center.unwrap();
+                click(
+                    cx,
+                    window,
+                    position,
+                    MouseButton::Left,
+                    1,
+                    Default::default(),
+                );
+                render(cx, window);
+                click(
+                    cx,
+                    window,
+                    position,
+                    MouseButton::Left,
+                    2,
+                    Default::default(),
+                );
+            }
+            Step::RightClick { .. } => click(
+                cx,
+                window,
+                center.unwrap(),
+                MouseButton::Right,
+                1,
+                Default::default(),
+            ),
+            Step::Hover { .. } => dispatch(
+                cx,
+                window,
+                MouseMoveEvent {
+                    position: center.unwrap(),
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                },
+            ),
+            Step::Scroll { lines, .. } => {
+                let position = center.unwrap();
+                dispatch(
+                    cx,
+                    window,
+                    MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers: Default::default(),
+                    },
+                );
+                render(cx, window);
+                dispatch(
+                    cx,
+                    window,
+                    ScrollWheelEvent {
+                        position,
+                        delta: ScrollDelta::Lines(point(0., *lines as f32)),
+                        modifiers: Default::default(),
+                        touch_phase: TouchPhase::Moved,
+                    },
+                );
+            }
+            Step::Press { .. } => cx.simulate_keystrokes(window, key.unwrap()),
+            Step::Type { text } => cx.simulate_input(window, text),
+            Step::AdvanceClock { millis } => cx
+                .executor()
+                .advance_clock(Duration::from_millis(*millis as u64)),
+            Step::Domain(action) => {
+                let perform = self.domain.as_ref().unwrap();
+                return cx
+                    .update_window(window, |_, window, cx| perform(action, view, window, cx))
+                    .unwrap_or(false);
+            }
+        }
+        true
+    }
+
+    fn check_oracles(
+        &self,
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        view: &Entity<V>,
+        step: Option<usize>,
+        disabled_click: Option<(TargetInfo, Vec<TargetInfo>)>,
+    ) -> Result<(), Failure> {
+        let Some(targets) = self.targets(cx, window) else {
+            return Ok(());
+        };
+
+        if self.focus_is_visible
+            && let Some(target) = targets
+                .iter()
+                .find(|target| target.focused() == Some(true) && !target.is_visible())
+        {
+            return Err(Failure::from_oracle(
+                "focus-is-visible",
+                format!("{} holds focus but is not visible", target.name()),
+            )
+            .at_step(step));
+        }
+
+        if let Some((clicked, before)) = disabled_click {
+            let after: HashMap<_, _> = targets
+                .iter()
+                .map(|target| (target.path().to_vec(), target.state()))
+                .collect();
+            for target in &before {
+                if let Some(state) = after.get(target.path())
+                    && *state != target.state()
+                {
+                    return Err(Failure::from_oracle(
+                        "disabled-is-inert",
+                        format!(
+                            "clicking disabled {} changed {}: {} -> {}",
+                            clicked.name(),
+                            target.name(),
+                            target.state(),
+                            state
+                        ),
+                    )
+                    .at_step(step));
+                }
+            }
+        }
+
+        for (name, invariant) in &self.invariants {
+            let result = cx
+                .update_window(window, |_, window, cx| {
+                    invariant(view, &targets, window, cx)
+                })
+                .unwrap_or(Ok(()));
+            result.map_err(|failure| failure.named(name).at_step(step))?;
+        }
+        Ok(())
+    }
+
+    /// Every target from every source, deduplicated by path and in a stable order.
+    /// `None` once the window has closed.
+    fn targets(&self, cx: &mut TestAppContext, window: AnyWindowHandle) -> Option<Vec<TargetInfo>> {
+        cx.update_window(window, |_, window, cx| {
+            let mut seen = std::collections::HashSet::new();
+            let mut targets: Vec<_> = self
+                .sources
+                .iter()
+                .flat_map(|source| source.targets(window, cx))
+                .filter(|target| seen.insert(target.path().to_vec()))
+                .collect();
+            target::sort(&mut targets);
+            targets
+        })
+        .ok()
+    }
+}
+
+fn default_sources() -> Vec<Rc<dyn TargetSource>> {
+    let sources: Vec<Rc<dyn TargetSource>> = vec![Rc::new(ObservedTargets)];
+    #[cfg(feature = "kit")]
+    let sources = {
+        let mut sources = sources;
+        sources.push(Rc::new(crate::kit::KitTargets));
+        sources
+    };
+    sources
+}
+
+fn is_eligible(verb: Verb, target: &TargetInfo) -> bool {
+    target.is_visible() && (verb == Verb::Click || !target.is_disabled())
+}
+
+/// Completes a frame. Returns `false` once the window has closed.
+fn render(cx: &mut TestAppContext, window: AnyWindowHandle) -> bool {
+    cx.update_window(window, |_, window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    })
+    .is_ok()
+}
+
+fn dispatch(cx: &mut TestAppContext, window: AnyWindowHandle, event: impl InputEvent) {
+    let input = event.to_platform_input();
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(input, cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Moves the pointer, renders so hover state and hitboxes reflect it, then presses
+/// and releases. The caller renders once after the step.
+fn click(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    position: gpui::Point<Pixels>,
+    button: MouseButton,
+    click_count: usize,
+    modifiers: gpui::Modifiers,
+) {
+    dispatch(
+        cx,
+        window,
+        MouseMoveEvent {
+            position,
+            pressed_button: None,
+            modifiers,
+        },
+    );
+    render(cx, window);
+    dispatch(
+        cx,
+        window,
+        MouseDownEvent {
+            button,
+            position,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        },
+    );
+    dispatch(
+        cx,
+        window,
+        MouseUpEvent {
+            button,
+            position,
+            modifiers,
+            click_count,
+        },
+    );
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message.to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic with a non-string payload".into()
+    }
+}
+
+thread_local! { static QUIET: Cell<bool> = const { Cell::new(false) }; }
+
+/// Panics inside a case are expected while searching and shrinking; the report
+/// carries their message. Silences the default hook on this thread only.
+fn install_quiet_panic_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if !QUIET.with(Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+}
+
+fn quietly<R>(f: impl FnOnce() -> R) -> R {
+    let was = QUIET.with(|quiet| quiet.replace(true));
+    let result = f();
+    QUIET.with(|quiet| quiet.set(was));
+    result
+}
