@@ -186,6 +186,10 @@ where
                 let (_, steps, outcome) = self.minimize(seed, steps, &config);
                 Err(Box::new(Report::new(outcome, rust(&steps), original)))
             }
+            Err(TestError::Abort(reason)) if reason.message().contains("local rejects") => panic!(
+                "gpui-proptest aborted: the domain action type's `Arbitrary` impl rejects \
+                 almost every input, so no steps could be generated ({reason})"
+            ),
             Err(TestError::Abort(reason)) => panic!("gpui-proptest aborted: {reason}"),
         }
     }

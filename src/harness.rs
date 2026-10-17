@@ -4,9 +4,10 @@ use crate::{
     target::{self, ObservedTargets, TargetInfo, TargetSource},
 };
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Entity, InputEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, TestAppContext,
-    TestDispatcher, TouchPhase, Window, WindowBounds, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Entity, InputEvent, Keystroke, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
+    TestAppContext, TestDispatcher, TouchPhase, Window, WindowBounds, WindowOptions, point, px,
+    size,
 };
 use std::{
     any::Any,
@@ -108,8 +109,19 @@ impl<V: 'static, A: 'static> Harness<V, A> {
 
     /// Replaces the keys [`Step::Press`] chooses from, as GPUI keystroke strings
     /// such as `"cmd-z"`. The first key is the one shrinking prefers.
+    ///
+    /// Panics on a key GPUI would not recognise, such as `"ctrl-banana"`: GPUI
+    /// accepts any word as a key name, so a typo would otherwise press nothing.
     pub fn with_keys<S: Into<String>>(mut self, keys: impl IntoIterator<Item = S>) -> Self {
         self.keys = keys.into_iter().map(Into::into).collect();
+        for key in &self.keys {
+            for keystroke in key.split(' ') {
+                assert!(
+                    is_known_key(keystroke),
+                    "with_keys: {keystroke:?} in {key:?} is not a key GPUI recognises"
+                );
+            }
+        }
         self
     }
 
@@ -199,9 +211,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         let mut failure = match result {
             Ok(Ok(())) => None,
             Ok(Err(failure)) => Some(failure),
-            Err(payload) => Some(
-                Failure::from_oracle("panic", panic_message(payload.as_ref())).at_step(last_step),
-            ),
+            Err(payload) => Some(panic_failure(payload.as_ref()).at_step(last_step)),
         };
 
         let teardown = quietly(|| {
@@ -213,7 +223,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         });
         if let (Err(payload), None) = (teardown, &failure) {
             failure = Some(
-                Failure::from_oracle("scheduler", panic_message(payload.as_ref()))
+                Failure::from_oracle("teardown", panic_message(payload.as_ref()))
                     .at_step(last_step),
             );
         }
@@ -246,8 +256,9 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         for setup in &self.setup {
             cx.update(|cx| setup(cx));
         }
+        target::begin_step();
         let (window, view) = cx.update(|cx| (self.open)(cx));
-        cx.run_until_parked();
+        settle(cx).map_err(|failure| failure.at_step(None))?;
         if !render(cx, window) {
             return Ok(());
         }
@@ -293,12 +304,15 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                 && target.as_ref().is_some_and(TargetInfo::is_disabled))
             .then(|| (target.clone().unwrap(), targets.clone()));
 
-            let performed = self.perform(cx, window, &view, step, target.as_ref(), key.as_deref());
+            target::begin_step();
+            let performed = self
+                .perform(cx, window, &view, step, target.as_ref(), key.as_deref())
+                .map_err(|failure| failure.at_step(Some(index)))?;
             if !performed {
                 trace.borrow_mut().mark_last_skipped();
                 continue;
             }
-            cx.run_until_parked();
+            settle(cx).map_err(|failure| failure.at_step(Some(index)))?;
             if !render(cx, window) {
                 return Ok(());
             }
@@ -315,7 +329,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         step: &Step<A>,
         target: Option<&TargetInfo>,
         key: Option<&str>,
-    ) -> bool {
+    ) -> Result<bool, Failure> {
         let center = target.map(|target| target.bounds().center());
         match step {
             Step::Click { modifiers, .. } => click(
@@ -325,7 +339,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                 MouseButton::Left,
                 1,
                 modifiers.to_gpui(),
-            ),
+            )?,
             Step::DoubleClick { .. } => {
                 let position = center.unwrap();
                 click(
@@ -335,7 +349,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                     MouseButton::Left,
                     1,
                     Default::default(),
-                );
+                )?;
                 render(cx, window);
                 click(
                     cx,
@@ -344,7 +358,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                     MouseButton::Left,
                     2,
                     Default::default(),
-                );
+                )?;
             }
             Step::RightClick { .. } => click(
                 cx,
@@ -353,7 +367,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                 MouseButton::Right,
                 1,
                 Default::default(),
-            ),
+            )?,
             Step::Hover { .. } => dispatch(
                 cx,
                 window,
@@ -362,7 +376,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                     pressed_button: None,
                     modifiers: Default::default(),
                 },
-            ),
+            )?,
             Step::Scroll { lines, .. } => {
                 let position = center.unwrap();
                 dispatch(
@@ -373,7 +387,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                         pressed_button: None,
                         modifiers: Default::default(),
                     },
-                );
+                )?;
                 render(cx, window);
                 dispatch(
                     cx,
@@ -384,21 +398,34 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                         modifiers: Default::default(),
                         touch_phase: TouchPhase::Moved,
                     },
-                );
+                )?;
             }
-            Step::Press { .. } => cx.simulate_keystrokes(window, key.unwrap()),
-            Step::Type { text } => cx.simulate_input(window, text),
+            // Dispatched one keystroke at a time, rather than through
+            // `simulate_keystrokes`, so a task that never parks is caught by `settle`.
+            Step::Press { .. } => {
+                for keystroke in key.unwrap().split(' ') {
+                    let keystroke = Keystroke::parse(keystroke).expect("with_keys validated keys");
+                    cx.dispatch_keystroke(window, keystroke);
+                    settle(cx)?;
+                }
+            }
+            Step::Type { text } => {
+                for keystroke in text.split("").filter_map(|ch| Keystroke::parse(ch).ok()) {
+                    cx.dispatch_keystroke(window, keystroke);
+                    settle(cx)?;
+                }
+            }
             Step::AdvanceClock { millis } => cx
                 .executor()
                 .advance_clock(Duration::from_millis(*millis as u64)),
             Step::Domain(action) => {
                 let perform = self.domain.as_ref().unwrap();
-                return cx
+                return Ok(cx
                     .update_window(window, |_, window, cx| perform(action, view, window, cx))
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
         }
-        true
+        Ok(true)
     }
 
     fn check_oracles(
@@ -450,11 +477,19 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         }
 
         for (name, invariant) in &self.invariants {
-            let result = cx
-                .update_window(window, |_, window, cx| {
+            // A panicking invariant is still that invariant's failure.
+            let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                cx.update_window(window, |_, window, cx| {
                     invariant(view, &targets, window, cx)
                 })
-                .unwrap_or(Ok(()));
+                .unwrap_or(Ok(()))
+            }))
+            .unwrap_or_else(|payload| {
+                Err(Failure::new(format!(
+                    "panicked: {}",
+                    panic_message(payload.as_ref())
+                )))
+            });
             result.map_err(|failure| failure.named(name).at_step(step))?;
         }
         Ok(())
@@ -502,12 +537,73 @@ fn render(cx: &mut TestAppContext, window: AnyWindowHandle) -> bool {
     .is_ok()
 }
 
-fn dispatch(cx: &mut TestAppContext, window: AnyWindowHandle, event: impl InputEvent) {
+fn dispatch(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    event: impl InputEvent,
+) -> Result<(), Failure> {
     let input = event.to_platform_input();
     let _ = cx.update_window(window, |_, window, cx| {
         window.dispatch_event(input, cx);
     });
-    cx.run_until_parked();
+    settle(cx)
+}
+
+/// Scheduler ticks one step may take before it counts as a task that never parks.
+const TICK_LIMIT: usize = 100_000;
+
+/// Runs tasks until none is runnable, like `run_until_parked`, but fails instead
+/// of hanging when a task keeps rescheduling itself.
+fn settle(cx: &mut TestAppContext) -> Result<(), Failure> {
+    let executor = cx.executor();
+    for _ in 0..TICK_LIMIT {
+        if !executor.tick() {
+            return Ok(());
+        }
+    }
+    Err(Failure::from_oracle(
+        "livelock",
+        format!(
+            "tasks were still runnable after {TICK_LIMIT} scheduler ticks; a task reschedules itself forever"
+        ),
+    ))
+}
+
+/// Keys GPUI names; any other multi-character key is a typo GPUI would accept.
+const NAMED_KEYS: &[&str] = &[
+    "enter",
+    "escape",
+    "tab",
+    "space",
+    "backspace",
+    "delete",
+    "insert",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "left",
+    "right",
+    "up",
+    "down",
+    "shift",
+    "control",
+    "alt",
+    "platform",
+    "function",
+];
+
+fn is_known_key(keystroke: &str) -> bool {
+    let Ok(parsed) = Keystroke::parse(keystroke) else {
+        return false;
+    };
+    let key = parsed.key.as_str();
+    key.chars().count() == 1
+        || NAMED_KEYS.contains(&key)
+        || key
+            .strip_prefix('f')
+            .and_then(|n| n.parse::<u8>().ok())
+            .is_some_and(|n| (1..=24).contains(&n))
 }
 
 /// Moves the pointer, renders so hover state and hitboxes reflect it, then presses
@@ -519,7 +615,7 @@ fn click(
     button: MouseButton,
     click_count: usize,
     modifiers: gpui::Modifiers,
-) {
+) -> Result<(), Failure> {
     dispatch(
         cx,
         window,
@@ -528,7 +624,7 @@ fn click(
             pressed_button: None,
             modifiers,
         },
-    );
+    )?;
     render(cx, window);
     dispatch(
         cx,
@@ -540,7 +636,7 @@ fn click(
             click_count,
             first_mouse: false,
         },
-    );
+    )?;
     dispatch(
         cx,
         window,
@@ -550,7 +646,19 @@ fn click(
             modifiers,
             click_count,
         },
-    );
+    )
+}
+
+/// A panic is the `panic` oracle's failure, unless the render-loop guard raised it.
+fn panic_failure(payload: &(dyn Any + Send)) -> Failure {
+    let message = panic_message(payload);
+    match message
+        .strip_prefix(target::LIVELOCK)
+        .and_then(|rest| rest.strip_prefix(": "))
+    {
+        Some(rest) => Failure::from_oracle("livelock", rest),
+        None => Failure::from_oracle("panic", message),
+    }
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> String {
