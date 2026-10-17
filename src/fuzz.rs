@@ -31,9 +31,10 @@ where
         let (seed, mut steps) = self.decode(bytes);
         let original = steps.len();
         let outcome = self.run_case(seed, &steps);
-        if let Some(failure) = outcome.failure() {
-            // Steps after the failing one never ran.
-            steps.truncate(failure.step().map_or(0, |step| step + 1));
+        if outcome.failure().is_some() {
+            // Steps after the failing one never started. A failure reading targets
+            // at the top of a step is reported after the step before it.
+            steps.truncate(outcome.reached());
             *self.last_fuzz_failure.borrow_mut() = Some((seed, steps.clone()));
             panic!("{}", Report::new(outcome, rust(&steps), original));
         }

@@ -218,6 +218,38 @@ fn disabled_targets_must_be_inert() {
     assert_eq!(failure.oracle(), "disabled-is-inert", "{failure}");
 }
 
+/// A disabled item that highlights itself on hover. The hover is not the click's
+/// doing.
+#[derive(Default)]
+struct HoverHighlight {
+    hovered: bool,
+}
+
+impl Render for HoverHighlight {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Away from the window's corner, where the pointer starts.
+        div().size_full().p(px(100.)).child(
+            div()
+                .id("item")
+                .size(px(40.))
+                .aria_selected(self.hovered)
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.hovered = *hovered;
+                    cx.notify();
+                }))
+                .proptest_target()
+                .disabled(true),
+        )
+    }
+}
+
+#[test]
+fn hover_effects_are_not_blamed_on_a_disabled_click() {
+    let outcome =
+        Harness::new(|_, cx| cx.new(|_| HoverHighlight::default())).run_case(0, &[click(0)]);
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
 #[test]
 fn steps_without_targets_are_skipped() {
     struct Empty;

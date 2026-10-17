@@ -121,3 +121,88 @@ fn domain_only_harnesses_decode_domain_steps() {
     assert!(!steps.is_empty());
     assert!(steps.iter().all(|step| matches!(step, Step::Domain(_))));
 }
+
+/// Domain actions decoded one byte each: even bytes poke, odd bytes check.
+#[derive(Clone, Debug)]
+enum Probe {
+    Poke,
+    Check,
+}
+
+impl<'a> gpui_proptest::arbitrary::Arbitrary<'a> for Probe {
+    fn arbitrary(
+        input: &mut gpui_proptest::arbitrary::Unstructured<'a>,
+    ) -> gpui_proptest::arbitrary::Result<Self> {
+        Ok(match u8::arbitrary(input)? % 2 {
+            0 => Probe::Poke,
+            _ => Probe::Check,
+        })
+    }
+}
+
+/// A seed of 0, then one byte per action.
+fn probes(actions: &[u8]) -> Vec<u8> {
+    [[0; 8].as_slice(), actions].concat()
+}
+
+thread_local! { static POKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Panics once poked, as a buggy custom source might.
+struct PokedSource;
+impl gpui_proptest::TargetSource for PokedSource {
+    fn targets(&self, _: &Window, _: &gpui::App) -> Vec<gpui_proptest::TargetInfo> {
+        assert!(!POKED.get(), "the source broke");
+        Vec::new()
+    }
+}
+
+fn probe_harness(perform: impl Fn(&Probe) -> bool + 'static) -> Harness<Counter, Probe> {
+    Harness::new(|_, cx| {
+        POKED.set(false);
+        cx.new(|_| Counter::default())
+    })
+    .with_ui_steps(false)
+    .with_domain(move |probe: &Probe, _, _, _| perform(probe))
+}
+
+#[test]
+fn fuzz_keeps_the_step_whose_targets_failed() {
+    // The poke does not apply, so no oracle runs after it; the source fails
+    // while the next step reads targets.
+    let harness = probe_harness(|_| {
+        POKED.set(true);
+        false
+    })
+    .with_target_source(PokedSource);
+    let bytes = probes(&[0, 0]);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| harness.fuzz(&bytes)))
+        .expect_err("the source fails");
+    let report = harness.take_fuzz_report().expect("the failure replays");
+    assert!(
+        report.failure().message().contains("the source broke"),
+        "{report}"
+    );
+}
+
+#[test]
+fn minimizing_keeps_the_failure_message() {
+    // Checking alone panics too, but with another message: a different bug.
+    let harness = probe_harness(|probe| {
+        match probe {
+            Probe::Poke => POKED.set(true),
+            Probe::Check if POKED.get() => panic!("checked after a poke"),
+            Probe::Check => panic!("checked alone"),
+        }
+        true
+    });
+    let bytes = probes(&[0, 1]);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| harness.fuzz(&bytes)))
+        .expect_err("the check panics");
+    let report = harness.take_fuzz_report().expect("the failure replays");
+    assert_eq!(
+        report.failure().message(),
+        "checked after a poke",
+        "{report}"
+    );
+    assert_eq!(report.steps().len(), 2, "{report}");
+}

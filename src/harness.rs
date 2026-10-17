@@ -228,12 +228,15 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         install_quiet_panic_hook();
         target::clear_registry();
         let trace = RefCell::new(Trace::new(seed));
+        let reached = Cell::new(0);
         let dispatcher = TestDispatcher::new(seed);
         let scheduler = dispatcher.scheduler().clone();
         let mut cx = TestAppContext::build(dispatcher, None);
 
         let result = quietly(|| {
-            panic::catch_unwind(AssertUnwindSafe(|| self.drive(&mut cx, steps, &trace)))
+            panic::catch_unwind(AssertUnwindSafe(|| {
+                self.drive(&mut cx, steps, &trace, &reached)
+            }))
         });
         let last_step = trace.borrow().records().len().checked_sub(1);
         let mut failure = match result {
@@ -256,7 +259,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             );
         }
         target::clear_registry();
-        Outcome::new(trace.into_inner(), failure)
+        Outcome::new(trace.into_inner(), failure, reached.get())
     }
 
     /// Runs one case and panics with its trace if it fails. Emitted regression
@@ -277,6 +280,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         cx: &mut TestAppContext,
         steps: &[Step<A>],
         trace: &RefCell<Trace>,
+        reached: &Cell<usize>,
     ) -> Result<(), Failure>
     where
         A: Debug,
@@ -293,6 +297,8 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         self.check_oracles(cx, window, &view, None, None)?;
 
         for (index, step) in steps.iter().enumerate() {
+            // A target source can fail here, before the step is recorded.
+            reached.set(index + 1);
             let Some(targets) = self.targets(cx, window) else {
                 return self.window_closed(index.checked_sub(1), &steps[index..], trace);
             };
@@ -323,14 +329,31 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                 continue;
             }
 
-            let before = (self.disabled_is_inert
+            let disabled_click = self.disabled_is_inert
                 && verb == Verb::Click
-                && target.as_ref().is_some_and(TargetInfo::is_disabled))
-            .then(|| (target.clone().unwrap(), targets.clone()));
+                && target.as_ref().is_some_and(TargetInfo::is_disabled);
+            let mut before = None;
+            // Snapshotted once the pointer has moved onto the target and the frame
+            // is drawn, so hover effects are not blamed on the disabled click.
+            let mut hovered = |cx: &mut TestAppContext| {
+                if disabled_click {
+                    before = self
+                        .targets(cx, window)
+                        .map(|targets| (target.clone().unwrap(), targets));
+                }
+            };
 
             target::begin_step();
             let performed = self
-                .perform(cx, window, &view, step, target.as_ref(), key.as_deref())
+                .perform(
+                    cx,
+                    window,
+                    &view,
+                    step,
+                    target.as_ref(),
+                    key.as_deref(),
+                    &mut hovered,
+                )
                 .map_err(|failure| failure.at_step(Some(index)))?;
             if !performed {
                 trace.borrow_mut().mark_last_skipped();
@@ -345,7 +368,8 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         Ok(())
     }
 
-    /// Deletes runs and pairs of steps while the same oracle still fails, then
+    /// Deletes runs and pairs of steps while the same oracle still fails with the
+    /// same message, then
     /// tries scheduler seed 0, within `max_iters` cases and `max_time`. Engines
     /// call it on their shrunk failure: proptest deletes each step once, in one
     /// pass, and byte shrinkers do not see steps at all.
@@ -360,13 +384,14 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         A: Clone + Debug,
     {
         let mut outcome = self.run_case(seed, &steps);
-        let Some(oracle) = outcome.failure().map(|failure| failure.oracle().to_owned()) else {
+        let Some(failed) = outcome.failure().cloned() else {
             return (seed, steps, outcome);
         };
+        // The message too: a smaller case that panics elsewhere is another bug.
         let fails_the_same = |outcome: &Outcome| {
-            outcome
-                .failure()
-                .is_some_and(|failure| failure.oracle() == oracle)
+            outcome.failure().is_some_and(|failure| {
+                failure.oracle() == failed.oracle() && failure.message() == failed.message()
+            })
         };
         let start = std::time::Instant::now();
         let mut budget = max_iters;
@@ -481,6 +506,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn perform(
         &self,
         cx: &mut TestAppContext,
@@ -489,6 +515,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
         step: &Step<A>,
         target: Option<&TargetInfo>,
         key: Option<&str>,
+        hovered: &mut dyn FnMut(&mut TestAppContext),
     ) -> Result<bool, Failure> {
         let center = target.and_then(TargetInfo::click_point);
         match step {
@@ -499,6 +526,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                 MouseButton::Left,
                 1,
                 modifiers.to_gpui(),
+                hovered,
             )?,
             Step::DoubleClick { .. } => {
                 let position = center.unwrap();
@@ -509,6 +537,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                     MouseButton::Left,
                     1,
                     Default::default(),
+                    &mut |_| {},
                 )?;
                 render(cx, window);
                 click(
@@ -518,6 +547,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                     MouseButton::Left,
                     2,
                     Default::default(),
+                    &mut |_| {},
                 )?;
             }
             Step::RightClick { .. } => click(
@@ -527,6 +557,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
                 MouseButton::Right,
                 1,
                 Default::default(),
+                &mut |_| {},
             )?,
             Step::Hover { .. } => dispatch(
                 cx,
@@ -824,8 +855,8 @@ fn is_known_key(keystroke: &str) -> bool {
             .is_some_and(|n| (1..=24).contains(&n))
 }
 
-/// Moves the pointer, renders so hover state and hitboxes reflect it, then presses
-/// and releases. The caller renders once after the step.
+/// Moves the pointer, renders so hover state and hitboxes reflect it, calls
+/// `hovered`, then presses and releases. The caller renders once after the step.
 fn click(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -833,6 +864,7 @@ fn click(
     button: MouseButton,
     click_count: usize,
     modifiers: gpui::Modifiers,
+    hovered: &mut dyn FnMut(&mut TestAppContext),
 ) -> Result<(), Failure> {
     dispatch(
         cx,
@@ -844,6 +876,7 @@ fn click(
         },
     )?;
     render(cx, window);
+    hovered(cx);
     dispatch(
         cx,
         window,
