@@ -5,7 +5,7 @@ use gpui::{
     AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
-use gpui_proptest::{Config, Harness, ModifierKeys, ProptestTargetExt, Step};
+use gpui_proptest::{Config, Harness, ModifierKeys, ProptestTargetExt, Step, ensure};
 use std::{
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -57,9 +57,10 @@ fn a_closing_window() {
     assert_eq!(outcome.trace().records().len(), 1);
 }
 
-// B. A target covered by an overlay: the click lands on the overlay, the trace
-// says it clicked the target.
+// B. A target under an `occlude()` overlay. Clicks aim at an uncovered point, and
+// a target covered everywhere is not chosen at all.
 struct Covered {
+    cover_width: f32,
     clicked: bool,
 }
 impl Render for Covered {
@@ -73,7 +74,6 @@ impl Render for Covered {
                     .size(px(40.))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.clicked = true;
-                        B_CLICKED.with(|c| c.set(true));
                         cx.notify();
                     }))
                     .proptest_target(),
@@ -84,22 +84,39 @@ impl Render for Covered {
                     .absolute()
                     .top_0()
                     .left_0()
-                    .size_full()
+                    .w(px(self.cover_width))
+                    .h_full()
                     .occlude(),
             )
     }
 }
 
-thread_local! { static B_CLICKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+fn covered(cover_width: f32) -> Harness<Covered> {
+    Harness::new(move |_, cx| {
+        cx.new(|_| Covered {
+            cover_width,
+            clicked: false,
+        })
+    })
+    .invariant("clicks reach the target", |view, _, _, cx| {
+        ensure!(!view.read(cx).clicked, "clicked");
+        Ok(())
+    })
+}
 
 #[test]
-fn b_occluded_target() {
-    let outcome =
-        Harness::new(|_, cx| cx.new(|_| Covered { clicked: false })).run_case(0, &[click(0)]);
-    // Known limitation: eligibility ignores hit-testing, so the trace says the
-    // covered target was clicked while the overlay took the click.
-    assert_eq!(outcome.trace().records()[0].description(), "click (under)");
-    assert!(!B_CLICKED.with(|c| c.get()));
+fn b_fully_covered_target_is_not_chosen() {
+    let outcome = covered(800.).run_case(0, &[click(0)]);
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(outcome.trace().records()[0].is_skipped());
+}
+
+#[test]
+fn b_partly_covered_target_is_clicked_where_uncovered() {
+    // The overlay covers the centre; the right edge stays clickable.
+    let outcome = covered(30.).run_case(0, &[click(0)]);
+    let failure = outcome.failure().expect("the click reached the target");
+    assert_eq!(failure.message(), "clicked");
 }
 
 // C. A task that never parks.

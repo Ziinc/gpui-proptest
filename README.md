@@ -162,7 +162,7 @@ opt-level = 2
 
 ## Limitations
 
-- A target covered by another element (a modal scrim, an `occlude()` overlay) is still eligible. The click lands on the cover while the trace names the target.
+- `kit` targets are aimed at their centre without a cover check: gpui-base does not expose their hitboxes. A `proptest_target` is hit-tested, aimed at a point no `occlude()` overlay covers, and skipped when covered everywhere.
 - Two targets with the same id under one parent share a path, so only one of them is ever chosen.
 - A step that closes the window ends the case. Later steps are not run and no oracle fails.
 - Targets are collected and sorted after every step. With 2,000 targets a click costs about 60 ms.
