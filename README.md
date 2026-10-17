@@ -95,7 +95,7 @@ Steps never store a concrete element. A step says "click the Nth eligible target
 | `livelock` | a step never settles: a task reschedules itself for 100,000 ticks, or the window draws 1,000 frames in one step (a hover or layout change that undoes itself) |
 | `teardown` | closing the app panics, or GPUI's test scheduler reports non-determinism at the end of a case |
 | `disabled-is-inert` | clicking a disabled target changes any target's checked, selected, expanded or value state |
-| `unique-ids` | two `proptest_target`s share an id path, so GPUI gives them one element state |
+| `unique-ids` | two `proptest_target`s with the same id path are painted in one frame, so GPUI gives them one element state. A target prepainted but not painted, such as inside an `invisible()` parent, does not count |
 | `window-closed` | a step closes the window; allow it with `with_window_may_close(true)`, which ends the case and records the rest as not run |
 | `focus-is-visible` | a target that reports focus is not visible (with `kit`, which reports focus) |
 

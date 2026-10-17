@@ -106,6 +106,13 @@ impl StateMachine for TodoSpec {
 
 #[test]
 fn finds_the_off_by_one_removal() {
+    // A random search misses the bug for about 1 seed in 600 (seed 545 does), so
+    // pin one unless the caller chose. This is the only test in this binary, so
+    // nothing reads the environment concurrently.
+    if std::env::var_os("GPUI_PROPTEST_SEED").is_none() {
+        // SAFETY: no other thread reads or writes the environment here.
+        unsafe { std::env::set_var("GPUI_PROPTEST_SEED", "1") };
+    }
     let report = Harness::from_state_machine::<TodoSpec>()
         .search(
             Config::default()

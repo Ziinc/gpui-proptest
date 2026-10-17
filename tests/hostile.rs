@@ -422,6 +422,26 @@ fn n_duplicate_ids() {
     assert!(outcome.is_ok(), "{outcome:?}");
 }
 
+// N2. A target inside an invisible parent is prepainted every frame but never
+// painted; that is not a second target with its id.
+struct Hidden;
+impl Render for Hidden {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            div()
+                .invisible()
+                .child(div().id("only").size(px(40.)).proptest_target()),
+        )
+    }
+}
+
+#[test]
+fn n_invisible_target_is_not_a_duplicate() {
+    let outcome =
+        Harness::new(|_, cx| cx.new(|_| Hidden)).run_case(0, &[Step::AdvanceClock { millis: 1 }]);
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
 // T2. The same loop in a view with no targets is caught by the frame guard.
 struct UntargetedShifty {
     hovered: bool,
