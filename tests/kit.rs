@@ -113,3 +113,35 @@ fn finds_a_checkbox_that_drifts_from_its_model() {
     );
     assert!(report.steps().len() <= 2, "{report}");
 }
+
+/// Grows when hovered, which moves it out from under the pointer, forever.
+struct Flicker {
+    hovered: bool,
+}
+
+impl Render for Flicker {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::{
+            InteractiveElement as _, StatefulInteractiveElement as _, prelude::FluentBuilder as _,
+        };
+        div().size_full().when(self.hovered, |d| d.pt_24()).child(
+            div()
+                .id("flicker")
+                .size_10()
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    this.hovered = *hovered;
+                    cx.notify();
+                })),
+        )
+    }
+}
+
+#[test]
+fn render_loops_in_kit_views_are_livelocks() {
+    let outcome = kit::harness(|_, cx| cx.new(|_| Flicker { hovered: false })).run_case(0, &[]);
+    assert_eq!(
+        outcome.failure().map(|failure| failure.oracle()),
+        Some("livelock"),
+        "{outcome:?}"
+    );
+}

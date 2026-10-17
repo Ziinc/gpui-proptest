@@ -1,4 +1,5 @@
 use crate::{
+    guard::Guarded,
     outcome::{Failure, Outcome, Trace},
     step::{NoDomain, Step, StepRecord, Verb},
     target::{self, ObservedTargets, TargetInfo, TargetSource},
@@ -61,7 +62,8 @@ pub struct Harness<V: 'static, A: 'static = NoDomain> {
 }
 
 impl<V: Render + 'static> Harness<V> {
-    /// Opens `build`'s view as the root of an 800×600 test window.
+    /// Opens `build`'s view in an 800×600 test window, inside a [`FrameGuard`].
+    /// The window's root view is the guard, so `window.root::<V>()` is `None`.
     pub fn new(build: impl Fn(&mut Window, &mut App) -> Entity<V> + 'static) -> Self {
         Self::with_window(move |cx| {
             let mut root = None;
@@ -76,7 +78,7 @@ impl<V: Render + 'static> Harness<V> {
                 .open_window(options, |window, cx| {
                     let view = build(window, cx);
                     root = Some(view.clone());
-                    view
+                    cx.new(|_| Guarded(view.into()))
                 })
                 .expect("open test window");
             (handle.into(), root.expect("window built its root view"))

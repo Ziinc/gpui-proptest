@@ -5,8 +5,11 @@
 //! feeds the focus-is-visible and disabled-is-inert oracles without any
 //! `proptest_target` calls.
 
-use crate::{Harness, TargetInfo, TargetSource};
-use gpui::{App, Bounds, Entity, Render, Window, WindowBounds, WindowOptions, point, px, size};
+use crate::{Harness, TargetInfo, TargetSource, guard::Guarded};
+use gpui::{
+    App, AppContext as _, Bounds, Entity, Render, Window, WindowBounds, WindowOptions, point, px,
+    size,
+};
 use gpui_base::test_support::{self, ElementSnapshot};
 
 /// Targets from gpui-kit's test-support observation. Added to every harness when
@@ -40,7 +43,8 @@ fn target_info(snapshot: &ElementSnapshot) -> TargetInfo {
 }
 
 /// A harness whose window opens through `gpui_kit::open_window` after
-/// `gpui_kit::init`, at 800×600, as gpui-kit applications and tests do.
+/// `gpui_kit::init`, at 800×600, as gpui-kit applications and tests do. The
+/// content is wrapped in a [`FrameGuard`](crate::FrameGuard).
 pub fn harness<V: Render + 'static>(
     build: impl Fn(&mut Window, &mut App) -> Entity<V> + 'static,
 ) -> Harness<V> {
@@ -52,8 +56,14 @@ pub fn harness<V: Render + 'static>(
             ))),
             ..Default::default()
         };
-        gpui_kit::open_window(options, cx, |window, cx| build(window, cx))
-            .expect("open gpui-kit window")
+        let mut content = None;
+        let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
+            let view = build(window, cx);
+            content = Some(view.clone());
+            cx.new(|_| Guarded(view.into()))
+        })
+        .expect("open gpui-kit window");
+        (window, content.expect("open_window ran its build closure"))
     })
     .with_setup(gpui_kit::init)
 }

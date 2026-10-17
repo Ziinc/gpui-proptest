@@ -421,3 +421,34 @@ fn n_duplicate_ids() {
         .run_case(0, &[click(0)]);
     assert!(outcome.is_ok(), "{outcome:?}");
 }
+
+// T2. The same loop in a view with no targets is caught by the frame guard.
+struct UntargetedShifty {
+    hovered: bool,
+}
+impl Render for UntargetedShifty {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .when(self.hovered, |d| d.pt(px(100.)))
+            .child(div().id("shifty").size(px(40.)).on_hover(cx.listener(
+                |this, hovered: &bool, _, cx| {
+                    this.hovered = *hovered;
+                    cx.notify();
+                },
+            )))
+    }
+}
+
+#[test]
+fn t_untargeted_layout_shift_on_hover() {
+    let failure = within(60, || {
+        Harness::new(|_, cx| cx.new(|_| UntargetedShifty { hovered: false }))
+            .run_case(0, &[])
+            .failure()
+            .map(|failure| (failure.oracle().to_owned(), failure.message().to_owned()))
+    });
+    let (oracle, message) = failure.expect("the render loop is reported");
+    assert_eq!(oracle, "livelock");
+    assert!(message.contains("frames in one step"), "{message}");
+}
