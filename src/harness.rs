@@ -565,14 +565,16 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             Step::Press { .. } => {
                 for keystroke in key.unwrap().split(' ') {
                     let keystroke = Keystroke::parse(keystroke).expect("with_keys validated keys");
-                    cx.dispatch_keystroke(window, keystroke);
-                    settle(cx)?;
+                    if !press(cx, window, keystroke)? {
+                        break;
+                    }
                 }
             }
             Step::Type { text } => {
                 for keystroke in text.split("").filter_map(|ch| Keystroke::parse(ch).ok()) {
-                    cx.dispatch_keystroke(window, keystroke);
-                    settle(cx)?;
+                    if !press(cx, window, keystroke)? {
+                        break;
+                    }
                 }
             }
             Step::AdvanceClock { millis } => cx
@@ -721,6 +723,23 @@ fn dispatch(
         window.dispatch_event(input, cx);
     });
     settle(cx)
+}
+
+/// Dispatches one keystroke and settles. Returns `false` once the window has
+/// closed, so the remaining keys are not pressed; the caller's render then ends
+/// the case. `TestAppContext::dispatch_keystroke` would panic instead.
+fn press(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    keystroke: Keystroke,
+) -> Result<bool, Failure> {
+    let open = cx
+        .update_window(window, |_, window, cx| {
+            window.dispatch_keystroke(keystroke, cx);
+        })
+        .is_ok();
+    settle(cx)?;
+    Ok(open)
 }
 
 /// Scheduler ticks one step may take before it counts as a task that never parks.

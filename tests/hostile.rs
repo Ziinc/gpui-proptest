@@ -2,8 +2,8 @@
 //! or blame the wrong thing.
 
 use gpui::{
-    AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_proptest::{Config, Harness, ModifierKeys, ProptestTargetExt, Step, ensure};
 use std::{
@@ -70,6 +70,50 @@ fn a_closing_window() {
         records[1].description().contains("window closed"),
         "{outcome:?}"
     );
+}
+
+// A2. Typing a key that closes the window ends the case like a closing click;
+// the keys after it are not pressed.
+struct QuitOnQ(FocusHandle);
+impl Render for QuitOnQ {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .track_focus(&self.0)
+            .on_key_down(|event, window, _| {
+                if event.keystroke.key == "q" {
+                    window.remove_window();
+                }
+            })
+    }
+}
+
+fn quit_on_q() -> Harness<QuitOnQ> {
+    Harness::new(|window, cx| {
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        cx.new(|_| QuitOnQ(focus))
+    })
+}
+
+#[test]
+fn a_typing_that_closes_the_window() {
+    let steps = [Step::Type { text: "qx".into() }];
+    let outcome = quit_on_q().run_case(0, &steps);
+    let failure = outcome
+        .failure()
+        .expect("closing the window fails the case");
+    assert_eq!(failure.oracle(), "window-closed");
+
+    let outcome = quit_on_q().with_window_may_close(true).run_case(0, &steps);
+    assert!(outcome.is_ok(), "{outcome:?}");
+
+    // A multi-key press stops at the key that closed the window.
+    let outcome = quit_on_q()
+        .with_keys(["q x"])
+        .with_window_may_close(true)
+        .run_case(0, &[Step::Press { key: 0 }]);
+    assert!(outcome.is_ok(), "{outcome:?}");
 }
 
 // B. A target under an `occlude()` overlay. Clicks aim at an uncovered point, and
