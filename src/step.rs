@@ -210,3 +210,8 @@ impl Debug for StepRecord {
         f.write_str(&self.description)
     }
 }
+
+/// Rust source for each step, as reports print them.
+pub(crate) fn rust<A: Debug>(steps: &[Step<A>]) -> Vec<String> {
+    steps.iter().map(Step::to_rust).collect()
+}

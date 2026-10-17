@@ -1,7 +1,7 @@
 //! The proptest engine: generates `(seed, steps)` inputs, runs them through
 //! [`Harness::run_case`], and shrinks failures.
 
-use crate::{Harness, ModifierKeys, Outcome, Report, Step};
+use crate::{Harness, ModifierKeys, Report, Step, step::rust};
 use proptest::{
     collection::vec,
     prelude::*,
@@ -183,7 +183,8 @@ where
             }
             Err(TestError::Fail(_, (seed, steps))) => {
                 let original = original_steps.get().unwrap_or(steps.len());
-                let (_, steps, outcome) = self.minimize(seed, steps, &config);
+                let (_, steps, outcome) =
+                    self.minimize(seed, steps, config.max_shrink_iters, config.max_shrink_time);
                 Err(Box::new(Report::new(outcome, rust(&steps), original)))
             }
             Err(TestError::Abort(reason)) if reason.message().contains("local rejects") => panic!(
@@ -192,78 +193,6 @@ where
             ),
             Err(TestError::Abort(reason)) => panic!("gpui-proptest aborted: {reason}"),
         }
-    }
-
-    /// proptest deletes each step once, in one pass, so a failure that needs two
-    /// steps removed together stays stuck there. This pass keeps deleting runs and
-    /// pairs of steps while the same oracle still fails, then tries seed 0.
-    fn minimize(
-        &self,
-        seed: u64,
-        mut steps: Vec<Step<A>>,
-        config: &Config,
-    ) -> (u64, Vec<Step<A>>, Outcome) {
-        let mut outcome = self.run_case(seed, &steps);
-        let Some(oracle) = outcome.failure().map(|failure| failure.oracle().to_owned()) else {
-            return (seed, steps, outcome);
-        };
-        let fails_the_same = |outcome: &Outcome| {
-            outcome
-                .failure()
-                .is_some_and(|failure| failure.oracle() == oracle)
-        };
-        let start = std::time::Instant::now();
-        let mut budget = config.max_shrink_iters;
-        let mut spend = || {
-            budget = budget.saturating_sub(1);
-            budget > 0 && start.elapsed() < config.max_shrink_time
-        };
-
-        // Contiguous runs of every length, longest first, then (for short traces)
-        // every pair: a decrement that cancels an increment is rarely adjacent.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let mut candidates: Vec<Vec<usize>> = (1..=steps.len())
-                .rev()
-                .flat_map(|len| {
-                    (0..=steps.len() - len).map(move |start| (start..start + len).collect())
-                })
-                .collect();
-            if steps.len() <= 16 {
-                for first in 0..steps.len() {
-                    for second in first + 2..steps.len() {
-                        candidates.push(vec![first, second]);
-                    }
-                }
-            }
-            for removed in candidates {
-                if !spend() {
-                    return (seed, steps, outcome);
-                }
-                let candidate: Vec<_> = steps
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| !removed.contains(index))
-                    .map(|(_, step)| step.clone())
-                    .collect();
-                let candidate_outcome = self.run_case(seed, &candidate);
-                if fails_the_same(&candidate_outcome) {
-                    steps = candidate;
-                    outcome = candidate_outcome;
-                    changed = true;
-                    break;
-                }
-            }
-        }
-
-        if seed != 0 && spend() {
-            let zero = self.run_case(0, &steps);
-            if fails_the_same(&zero) {
-                return (0, steps, zero);
-            }
-        }
-        (seed, steps, outcome)
     }
 
     fn step_strategy(&self, config: &Config) -> BoxedStrategy<Step<A>> {
@@ -356,8 +285,4 @@ where
             A::arbitrary(&mut arbitrary::Unstructured::new(&bytes)).ok()
         })
         .boxed()
-}
-
-fn rust<A: Debug>(steps: &[Step<A>]) -> Vec<String> {
-    steps.iter().map(Step::to_rust).collect()
 }

@@ -59,6 +59,8 @@ pub struct Harness<V: 'static, A: 'static = NoDomain> {
     unique_ids: bool,
     window_may_close: bool,
     ui_steps: bool,
+    /// The last input `fuzz` saw fail, minimized once the fuzzer stops.
+    pub(crate) last_fuzz_failure: RefCell<Option<(u64, Vec<Step<A>>)>>,
 }
 
 impl<V: Render + 'static> Harness<V> {
@@ -102,6 +104,7 @@ impl<V: 'static> Harness<V> {
             unique_ids: true,
             window_may_close: false,
             ui_steps: true,
+            last_fuzz_failure: RefCell::new(None),
         }
     }
 }
@@ -160,6 +163,7 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             unique_ids: self.unique_ids,
             window_may_close: self.window_may_close,
             ui_steps: self.ui_steps,
+            last_fuzz_failure: RefCell::new(None),
         }
     }
 
@@ -339,6 +343,83 @@ impl<V: 'static, A: 'static> Harness<V, A> {
             self.check_oracles(cx, window, &view, Some(index), before)?;
         }
         Ok(())
+    }
+
+    /// Deletes runs and pairs of steps while the same oracle still fails, then
+    /// tries scheduler seed 0, within `max_iters` cases and `max_time`. Engines
+    /// call it on their shrunk failure: proptest deletes each step once, in one
+    /// pass, and byte shrinkers do not see steps at all.
+    pub(crate) fn minimize(
+        &self,
+        seed: u64,
+        mut steps: Vec<Step<A>>,
+        max_iters: u32,
+        max_time: Duration,
+    ) -> (u64, Vec<Step<A>>, Outcome)
+    where
+        A: Clone + Debug,
+    {
+        let mut outcome = self.run_case(seed, &steps);
+        let Some(oracle) = outcome.failure().map(|failure| failure.oracle().to_owned()) else {
+            return (seed, steps, outcome);
+        };
+        let fails_the_same = |outcome: &Outcome| {
+            outcome
+                .failure()
+                .is_some_and(|failure| failure.oracle() == oracle)
+        };
+        let start = std::time::Instant::now();
+        let mut budget = max_iters;
+        let mut spend = || {
+            budget = budget.saturating_sub(1);
+            budget > 0 && start.elapsed() < max_time
+        };
+
+        // Contiguous runs of every length, longest first, then (for short traces)
+        // every pair: a decrement that cancels an increment is rarely adjacent.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut candidates: Vec<Vec<usize>> = (1..=steps.len())
+                .rev()
+                .flat_map(|len| {
+                    (0..=steps.len() - len).map(move |start| (start..start + len).collect())
+                })
+                .collect();
+            if steps.len() <= 16 {
+                for first in 0..steps.len() {
+                    for second in first + 2..steps.len() {
+                        candidates.push(vec![first, second]);
+                    }
+                }
+            }
+            for removed in candidates {
+                if !spend() {
+                    return (seed, steps, outcome);
+                }
+                let candidate: Vec<_> = steps
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !removed.contains(index))
+                    .map(|(_, step)| step.clone())
+                    .collect();
+                let candidate_outcome = self.run_case(seed, &candidate);
+                if fails_the_same(&candidate_outcome) {
+                    steps = candidate;
+                    outcome = candidate_outcome;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        if seed != 0 && spend() {
+            let zero = self.run_case(0, &steps);
+            if fails_the_same(&zero) {
+                return (0, steps, zero);
+            }
+        }
+        (seed, steps, outcome)
     }
 
     /// The eligible target `choice` picks, aimed at a point nothing covers. A
