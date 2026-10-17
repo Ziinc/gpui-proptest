@@ -3,6 +3,7 @@ name = "gpui-proptest"
 version = "0.1.0"
 edition = "2024"
 description = "Property-based testing for GPUI: random user actions, invariants and shrinking to a minimal replayable trace"
+license = "MIT"
 repository = "https://github.com/Ziinc/gpui-proptest"
 keywords = ["gpui", "proptest", "property-testing", "testing", "ui"]
 categories = ["development-tools::testing", "gui"]
