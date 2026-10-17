@@ -288,13 +288,6 @@ pub(crate) fn take_duplicates() -> Vec<Vec<ElementId>> {
     DUPLICATES.with(|duplicates| std::mem::take(&mut *duplicates.borrow_mut()))
 }
 
-thread_local! { static DUPLICATES: RefCell<Vec<Vec<ElementId>>> = const { RefCell::new(Vec::new()) }; }
-
-/// Paths that more than one target used in the same frame, since the last call.
-pub(crate) fn take_duplicates() -> Vec<Vec<ElementId>> {
-    DUPLICATES.with(|duplicates| std::mem::take(&mut *duplicates.borrow_mut()))
-}
-
 /// Forgets every registration. Each case builds a new app whose window ids may repeat.
 pub(crate) fn clear_registry() {
     REGISTRY.with(|registry| registry.borrow_mut().clear());
